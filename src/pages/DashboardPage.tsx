@@ -16,9 +16,46 @@ import {
   fetchArticleContentForCompany,
 } from "../services/freshIntelligenceService";
 import { buildConnectionsForCompany } from "../services/connectionService";
+import {
+  runIntelligenceUpdatePipeline,
+  stopPipeline,
+  resetPipeline,
+  getInitialPipelineState,
+  type PipelineState,
+} from "../services/intelligencePipelineService";
 
 import "./DashboardPage.css";
 import { attachConnectionsToRisks } from "../services/riskConnectionBackfill";
+import { computeDriverPriority } from "../services/driverComparisonService";
+import { computeOperatingModelCompleteness } from "../services/operatingModelService";
+import { getCalibrationForCompany, type CompanyCalibrationInput } from "../services/calibrationService";
+import {
+  getRiskSummary,
+  getRiskWhatChanged,
+  getRiskWhyNow,
+  getRiskBusinessImpact,
+  getDecisionTrigger as getTrustSafeDecisionTrigger,
+  getOpportunityTitle,
+  getOpportunitySummary,
+  getOpportunityWhatChanged,
+  getOpportunityWhyNow,
+  getOperatingChangeSummary,
+  getWatchlistSummary,
+  getWatchlistUpgradeTrigger,
+  getForecastSummary,
+  getMemoLine,
+  isManufacturingOpportunity,
+  isFreightIssue,
+  isTariffIssue,
+} from "../services/trustSafeDisplayService";
+import ScenarioEditor from "../components/ScenarioEditor";
+import DriverPriorityMap from "../components/DriverPriorityMap";
+import ForecastAccuracyPanel from "../components/ForecastAccuracyPanel";
+import DecisionMemoryPanel from "../components/DecisionMemoryPanel";
+import ActionRoiPanel, { type ActionRoiItem } from "../components/ActionRoiPanel";
+import OperatingModelCompleteness from "../components/OperatingModelCompleteness";
+import CandidateReviewQueue, { type CandidateQueueItem } from "../components/CandidateReviewQueue";
+import { runQualityGateOnAll, type IssueGateResult } from "../services/issueQualityGateService";
 type Company = {
   id: string;
   name: string;
@@ -319,6 +356,7 @@ export default function DashboardPage() {
   );
   const [, setConnections] = useState<CompanyConnection[]>([]);
 const [impactPaths, setImpactPaths] = useState<ImpactPath[]>([]);
+const [calibration, setCalibration] = useState<CompanyCalibrationInput | null>(null);
 
 const [matchedConnectionsByItemId, setMatchedConnectionsByItemId] = useState<
   Record<string, MatchedConnectionPath[]>
@@ -333,6 +371,7 @@ const [signalStats, setSignalStats] = useState({
   const [expandedOpportunityIds, setExpandedOpportunityIds] = useState<Set<string>>(new Set());
   const [showRawEvents, setShowRawEvents] = useState(false);
   const [showAdvancedPipeline, setShowAdvancedPipeline] = useState(false);
+  const [pipelineState, setPipelineState] = useState<PipelineState>(getInitialPipelineState());
 
   function toggleRiskId(id: string) {
     setExpandedRiskIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -542,6 +581,14 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
     setConnections(connectionResult.data || []);
     setImpactPaths(impactPathResult.data || []);
 
+    // Load calibration data for new moat components
+    try {
+      const cal = await getCalibrationForCompany(latestCompany.id);
+      if (cal) setCalibration(cal as CompanyCalibrationInput);
+    } catch {
+      // calibration is non-critical — dashboard still works without it
+    }
+
     setLoading(false);
   }
 
@@ -556,6 +603,35 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
     } finally {
       setBusy(null);
     }
+  }
+
+  async function handleRunIntelligenceUpdate() {
+    if (!company) return;
+    if (busy !== null || pipelineState.running) return;
+    setBusy("pipeline");
+    setPipelineState(getInitialPipelineState());
+    try {
+      await runIntelligenceUpdatePipeline(company.id, (state) => {
+        setPipelineState({ ...state });
+      });
+      await loadDashboard();
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function handleStopResetPipeline() {
+    stopPipeline();
+    resetPipeline();
+    setPipelineState(prev => ({
+      ...prev,
+      running: false,
+      error: prev.running ? "Pipeline stopped by user." : null,
+      steps: prev.steps.map(s =>
+        s.status === "running" ? { ...s, status: "skipped" } : s
+      ),
+    }));
+    if (busy === "pipeline") setBusy(null);
   }
 
   async function updateActionStatus(actionId: string, status: string) {
@@ -600,20 +676,93 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
     const previous = matching[1].priority_score || 0;
     const delta = current - previous;
 
+    if (delta === 0) return "Unchanged";
     return delta > 0 ? `+${delta}` : String(delta);
   }
 
-  const riskItems = risks.filter(
-  (risk) => !risk.display_section || risk.display_section === "risk_register"
-);
+  // Raw generated arrays (before quality gate)
+  const _allRiskItems = risks.filter(
+    (risk) => !risk.display_section || risk.display_section === "risk_register"
+  );
+  const _allOperatingChanges = risks.filter(
+    (risk) => risk.display_section === "operating_changes"
+  );
+  const _allWatchlistItems = risks.filter(
+    (risk) => risk.display_section === "watchlist"
+  );
 
-const operatingChanges = risks.filter(
-  (risk) => risk.display_section === "operating_changes"
-);
+  // Quality gate: evaluate all generated candidates
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const _gateResults = useMemo(
+    () => runQualityGateOnAll(
+      [..._allRiskItems, ..._allOperatingChanges, ..._allWatchlistItems],
+      opportunities
+    ),
+    [risks, opportunities] // eslint-disable-line react-hooks/exhaustive-deps
+  );
 
-const watchlistItems = risks.filter(
-  (risk) => risk.display_section === "watchlist"
-);
+  // Published (executive-facing): only items that pass the gate
+  // candidate_review and quarantine are both excluded from executive sections
+  const riskItems = _allRiskItems.filter((r) => {
+    const d = _gateResults.get(r.id)?.decision;
+    return !d || d === "publish";
+  });
+  const operatingChanges = _allOperatingChanges.filter((r) => {
+    const d = _gateResults.get(r.id)?.decision;
+    return !d || d === "publish";
+  });
+  const watchlistItems = _allWatchlistItems.filter((r) => {
+    const d = _gateResults.get(r.id)?.decision;
+    return !d || d === "publish";
+  });
+  const publishedOpportunities = opportunities.filter((o) => {
+    const d = _gateResults.get(o.id)?.decision;
+    return !d || d === "publish";
+  });
+
+  // Items blocked by quality gate → Candidate Review Queue
+  // Risks: quarantine or candidate_review | Opportunities: quarantine or candidate_review
+  const candidateQueueItems: CandidateQueueItem[] = [
+    ...[..._allRiskItems, ..._allOperatingChanges, ..._allWatchlistItems]
+      .filter((r) => {
+        const d = _gateResults.get(r.id)?.decision;
+        return d === "quarantine" || d === "candidate_review";
+      })
+      .map((r) => ({
+        id: r.id,
+        type: "risk" as const,
+        title: r.risk_title || "Unnamed risk",
+        gateResult: _gateResults.get(r.id)!,
+      })),
+    ...opportunities
+      .filter((o) => {
+        const d = _gateResults.get(o.id)?.decision;
+        return d === "quarantine" || d === "candidate_review";
+      })
+      .map((o) => ({
+        id: o.id,
+        type: "opportunity" as const,
+        title: o.title || "Unnamed opportunity",
+        gateResult: _gateResults.get(o.id)!,
+      })),
+  ];
+
+  // Published issue IDs — used to filter actions so quarantined candidates don't generate actions
+  const publishedIssueIds = new Set([
+    ...riskItems.map(r => r.id),
+    ...operatingChanges.map(r => r.id),
+    ...watchlistItems.map(r => r.id),
+    ...publishedOpportunities.map(o => o.id),
+  ]);
+
+  // Actions linked only to published issues — hides actions from quarantined/review candidates
+  const publishedActions = actions.filter(action => {
+    if (action.risk_id) return publishedIssueIds.has(action.risk_id);
+    if (action.opportunity_id) return publishedIssueIds.has(action.opportunity_id);
+    return true;
+  });
+
+  const blockedOpportunityCount = candidateQueueItems.filter(i => i.type === "opportunity").length;
 
 const totalRiskHigh = riskItems.reduce(
   (sum, risk) => sum + Number(risk.impact_high || 0),
@@ -687,20 +836,25 @@ function riskExposureSubtitle() {
 
   return "Modeled downside";
 }
-  const totalOpportunityHigh = opportunities.reduce(
+  const totalOpportunityHigh = publishedOpportunities.reduce(
     (sum, opportunity) => sum + Number(opportunity.revenue_high || 0),
     0
   );
 
-  const totalOpportunityLow = opportunities.reduce(
+  const totalOpportunityLow = publishedOpportunities.reduce(
     (sum, opportunity) => sum + Number(opportunity.revenue_low || 0),
     0
   );
 
-  const openActions = actions.filter(
+  const openActions = publishedActions.filter(
     (action) => action.status !== "completed"
   ).length;
 
+  // Freight-specific range for exposure graph (not total risk)
+  const freightRiskLow = riskItems.filter(r => isFreightIssue(r)).reduce((s, r) => s + Number(r.impact_low || 0), 0);
+  const freightRiskHigh = riskItems.filter(r => isFreightIssue(r)).reduce((s, r) => s + Number(r.impact_high || 0), 0);
+
+  // All evidence (including from rejected items) for the Evidence Sources metric
   const allEvidenceItems: any[] = [
     ...riskItems.flatMap((r) => r.evidence_items || []),
     ...operatingChanges.flatMap((r) => r.evidence_items || []),
@@ -717,12 +871,136 @@ function riskExposureSubtitle() {
         )
       : 0;
 
-  const executiveMemo = useMemo(() => {
-    if (!brief?.brief_text) return "";
+  const actionRoiItems = useMemo((): ActionRoiItem[] => {
+    return publishedActions.map((action) => {
+      const linkedRisk = action.risk_id
+        ? risks.find((r) => r.id === action.risk_id)
+        : null;
+      const linkedOpp = action.opportunity_id
+        ? opportunities.find((o) => o.id === action.opportunity_id)
+        : null;
 
-    const parts = brief.brief_text.split("TOP RISKS");
-    return parts[0]?.trim() || brief.brief_text;
-  }, [brief]);
+      // Derive workflow fields from the linked issue
+      const derivedFields = deriveActionRoiFields(action, linkedRisk ?? null, linkedOpp ?? null);
+
+      const safeTitle = isFreightIssue({ risk_title: linkedRisk?.risk_title, issue_category: (linkedRisk as any)?.issue_category })
+        ? "Validate spot-exposed freight lanes and surcharge exposure"
+        : isTariffIssue({ risk_title: linkedRisk?.risk_title, issue_category: (linkedRisk as any)?.issue_category })
+        ? "Validate tariff relief — confirm supplier landed-cost updates and remaining exposure"
+        : action.title;
+
+      return {
+        id: action.id,
+        title: safeTitle,
+        linkedIssueTitle: linkedRisk?.risk_title || linkedOpp?.title || null,
+        owner: action.owner || derivedFields.owner,
+        deadline: action.deadline || derivedFields.deadline,
+        status: action.status || "open",
+        expectedBenefitLow: linkedRisk ? linkedRisk.impact_low : (linkedOpp ? linkedOpp.revenue_low : null),
+        expectedBenefitHigh: linkedRisk ? linkedRisk.impact_high : (linkedOpp ? linkedOpp.revenue_high : null),
+        effortLevel: derivedFields.effortLevel,
+        protectedValue: linkedRisk ? linkedRisk.impact_low : null,
+        successCondition: derivedFields.successCondition,
+        nextStep: derivedFields.nextStep,
+        decisionTrigger: derivedFields.decisionTrigger,
+        outcomeStatus: action.status === "completed" ? "Completed" : "Open — awaiting validation",
+      };
+    });
+  }, [publishedActions, risks, opportunities]);
+
+  const driverPriorityReport = useMemo(
+    () => computeDriverPriority(
+      riskItems,
+      publishedOpportunities,
+      calibration as Record<string, number | null> | null,
+      operatingChanges
+    ),
+    [riskItems, publishedOpportunities, calibration, operatingChanges]
+  );
+
+  const forecastRows = useMemo(() => {
+    return [
+      ...riskItems.map((r) => {
+        const safeStatus = getForecastSummary({
+          risk_title: r.risk_title,
+          executive_summary: r.executive_summary,
+          issue_category: r.issue_category,
+          methodology: r.methodology as Record<string, unknown> | null,
+        });
+        const modelStatus = getIssueModelStatus(r.methodology);
+        return {
+          issueId: r.id,
+          issueType: "risk" as const,
+          title: r.risk_title,
+          forecastDate: null as string | null,
+          predictedLow: r.impact_low,
+          predictedHigh: r.impact_high,
+          currentStatus: safeStatus,
+          outcomeStatus: "open" as const,
+          actualImpact: null as number | null,
+          outcomeNotes: modelStatus.status === "scenario_fallback"
+            ? "Scenario-modeled — awaiting validation"
+            : null,
+        };
+      }),
+      ...operatingChanges.map((r) => {
+        const safeStatus = getForecastSummary({
+          risk_title: r.risk_title,
+          executive_summary: r.executive_summary,
+          issue_category: r.issue_category,
+          methodology: r.methodology as Record<string, unknown> | null,
+        });
+        return {
+          issueId: r.id,
+          issueType: "operating_change" as const,
+          title: r.risk_title,
+          forecastDate: null as string | null,
+          predictedLow: r.impact_low,
+          predictedHigh: r.impact_high,
+          currentStatus: safeStatus,
+          outcomeStatus: "awaiting_data" as const,
+          actualImpact: null as number | null,
+          outcomeNotes: "Awaiting procurement validation",
+        };
+      }),
+      ...publishedOpportunities.map((o) => {
+        const safeStatus = getForecastSummary({
+          title: o.title,
+          summary: o.summary,
+          issue_category: null,
+          methodology: o.methodology as Record<string, unknown> | null,
+        });
+        const quality = getOpportunityQuality(o);
+        return {
+          issueId: o.id,
+          issueType: "opportunity" as const,
+          title: isManufacturingOpportunity(o) ? "Manufacturing Demand Opportunity Candidate" : quality === "needs_validation"
+            ? o.title.replace(/opportunity/i, "Opportunity Candidate")
+            : o.title,
+          forecastDate: null as string | null,
+          predictedLow: o.revenue_low,
+          predictedHigh: o.revenue_high,
+          currentStatus: safeStatus,
+          outcomeStatus: quality === "needs_validation"
+            ? ("awaiting_data" as const)
+            : quality === "candidate"
+            ? ("monitoring_only" as const)
+            : ("open" as const),
+          actualImpact: null as number | null,
+          outcomeNotes: quality === "needs_validation"
+            ? "Not eligible for accuracy scoring until validated"
+            : quality === "candidate"
+            ? "Candidate upside — validate before treating as forecast"
+            : null,
+        };
+      }),
+    ];
+  }, [riskItems, operatingChanges, publishedOpportunities]);
+
+  const modelCompletenessReport = useMemo(
+    () => computeOperatingModelCompleteness(calibration),
+    [calibration]
+  );
 
   if (loading) {
     return (
@@ -745,23 +1023,18 @@ function riskExposureSubtitle() {
             </p>
           </div>
 
-          <Link to="/onboarding">
-            <button className="secondary-button">Add Company</button>
-          </Link>
-          <Link to="/calibration">
-  <button className="secondary-button">Calibrate Model</button>
-</Link>
         </header>
 
-        <section className="toolbar">
+        {/* ── Primary toolbar ── */}
+        <section className="toolbar toolbar-primary">
           <button
-            className="primary-button"
-            onClick={() =>
-              run("fresh", () => fetchFreshIntelligenceForCompany(company!.id))
-            }
+            className="primary-button toolbar-run-btn"
+            onClick={handleRunIntelligenceUpdate}
             disabled={busy !== null}
           >
-            {busy === "fresh" ? "Fetching..." : "Refresh Intelligence"}
+            {busy === "pipeline"
+              ? `Updating Intelligence…`
+              : "Run Intelligence Update"}
           </button>
 
           <button
@@ -769,33 +1042,96 @@ function riskExposureSubtitle() {
             onClick={() => run("brief", () => generateBriefForCompany(company!.id))}
             disabled={busy !== null}
           >
-            {busy === "brief" ? "Generating..." : "Generate Brief"}
+            {busy === "brief" ? "Generating…" : "Generate Executive Brief"}
           </button>
 
-          <Link to="/calibration">
-            <button className="secondary-button" disabled={busy !== null}>Approve Assumptions</button>
-          </Link>
+          <button
+            className="toolbar-stop-btn"
+            onClick={handleStopResetPipeline}
+            disabled={!pipelineState.running && busy !== "pipeline"}
+            title="Stop / Reset Pipeline"
+          >
+            ■ Stop / Reset
+          </button>
 
-          <button className="secondary-button" disabled>Export Memo</button>
+          <div className="toolbar-secondary-group">
+            <Link to="/onboarding">
+              <button className="secondary-button" disabled={busy !== null}>Add Company</button>
+            </Link>
+            <Link to="/calibration">
+              <button className="secondary-button" disabled={busy !== null}>Calibrate Model</button>
+            </Link>
+            <Link to="/calibration">
+              <button className="secondary-button" disabled={busy !== null}>Approve Assumptions</button>
+            </Link>
+            <button className="secondary-button" disabled>Export Memo</button>
+          </div>
 
           <button
             className="text-button toolbar-advanced-toggle"
             onClick={() => setShowAdvancedPipeline((v) => !v)}
           >
-            {showAdvancedPipeline ? "▲ Hide pipeline controls" : "▼ Advanced pipeline controls"}
+            {showAdvancedPipeline ? "▲ Hide advanced controls" : "▼ Advanced pipeline controls"}
           </button>
         </section>
 
+        {/* ── Pipeline progress card ── */}
+        {(pipelineState.running || pipelineState.completedAt !== null || pipelineState.error !== null) && (
+          <section className="pipeline-progress-card">
+            <div className="pipeline-progress-header">
+              {pipelineState.running && (
+                <span className="pipeline-progress-title">Running intelligence update…</span>
+              )}
+              {!pipelineState.running && pipelineState.error && (
+                <span className="pipeline-progress-title pipeline-error-title">
+                  Pipeline stopped — {pipelineState.error}
+                </span>
+              )}
+              {!pipelineState.running && !pipelineState.error && pipelineState.completedAt && (
+                <span className="pipeline-progress-title pipeline-complete-title">
+                  Intelligence update complete
+                </span>
+              )}
+              <button
+                className="pipeline-dismiss-btn"
+                onClick={() => setPipelineState(getInitialPipelineState())}
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            </div>
+            <ol className="pipeline-steps-list">
+              {pipelineState.steps.map((step) => (
+                <li key={step.id} className={`pipeline-step pipeline-step-${step.status}`}>
+                  <span className="pipeline-step-icon">
+                    {step.status === "complete" && "✓"}
+                    {step.status === "running" && <span className="pipeline-spinner" />}
+                    {step.status === "failed" && "✗"}
+                    {step.status === "skipped" && "–"}
+                    {step.status === "pending" && "·"}
+                  </span>
+                  <span className="pipeline-step-label">{step.label}</span>
+                  {step.status === "failed" && step.error && (
+                    <span className="pipeline-step-error">{step.error.slice(0, 100)}</span>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+
+        {/* ── Advanced pipeline controls (collapsed by default) ── */}
         {showAdvancedPipeline && (
           <section className="toolbar toolbar-advanced">
+            <p className="toolbar-advanced-note">
+              Advanced controls are for debugging individual pipeline stages. Most users should use <strong>Run Intelligence Update</strong>.
+            </p>
             <button
-              className="primary-button"
-              onClick={() =>
-                run("article-bodies", () => fetchArticleContentForCompany(company!.id))
-              }
+              className="secondary-button"
+              onClick={() => run("fresh", () => fetchFreshIntelligenceForCompany(company!.id))}
               disabled={busy !== null}
             >
-              {busy === "article-bodies" ? "Fetching Bodies..." : "Fetch Article Bodies"}
+              {busy === "fresh" ? "Fetching…" : "Refresh Intelligence (Currents)"}
             </button>
             <button
               className="secondary-button"
@@ -804,14 +1140,21 @@ function riskExposureSubtitle() {
               Stop Fresh Batch
             </button>
             <button
-              className="primary-button"
+              className="secondary-button"
+              onClick={() => run("article-bodies", () => fetchArticleContentForCompany(company!.id))}
+              disabled={busy !== null}
+            >
+              {busy === "article-bodies" ? "Fetching…" : "Fetch Article Bodies"}
+            </button>
+            <button
+              className="secondary-button"
               onClick={() => run("fetch", () => fetchEventsForCompany(company!.id))}
               disabled={busy !== null}
             >
-              {busy === "fetch" ? "Fetching..." : "Fetch Events"}
+              {busy === "fetch" ? "Fetching…" : "Fetch Events"}
             </button>
             <button
-              className="primary-button"
+              className="secondary-button"
               onClick={() =>
                 run("score", async () => {
                   await scoreEventsForCompany(company!.id);
@@ -820,26 +1163,24 @@ function riskExposureSubtitle() {
               }
               disabled={busy !== null}
             >
-              {busy === "score" ? "Scoring..." : "Score Events"}
+              {busy === "score" ? "Scoring…" : "Score Events"}
             </button>
             <button
-              className="primary-button"
+              className="secondary-button"
               onClick={() => run("connections", () => buildConnectionsForCompany(company!.id))}
               disabled={busy !== null}
             >
-              {busy === "connections" ? "Building..." : "Build Connections"}
+              {busy === "connections" ? "Building…" : "Build Connections"}
             </button>
             <button
-              className="primary-button"
-              onClick={() =>
-                run("match-connections", async () => { await matchEventsToConnections(company!.id); })
-              }
+              className="secondary-button"
+              onClick={() => run("match-connections", async () => { await matchEventsToConnections(company!.id); })}
               disabled={busy !== null}
             >
-              {busy === "match-connections" ? "Matching..." : "Match Events to Connections"}
+              {busy === "match-connections" ? "Matching…" : "Match Events to Connections"}
             </button>
             <button
-              className="primary-button"
+              className="secondary-button"
               onClick={() =>
                 run("risks", async () => {
                   await generateDynamicRisksForCompany(company!.id);
@@ -849,10 +1190,10 @@ function riskExposureSubtitle() {
               }
               disabled={busy !== null}
             >
-              {busy === "risks" ? "Generating..." : "Generate Risks"}
+              {busy === "risks" ? "Generating…" : "Generate Risks"}
             </button>
             <button
-              className="primary-button"
+              className="secondary-button"
               onClick={() =>
                 run("opportunities", async () => {
                   await generateOpportunitiesForCompany(company!.id);
@@ -863,25 +1204,21 @@ function riskExposureSubtitle() {
               }
               disabled={busy !== null}
             >
-              {busy === "opportunities" ? "Generating..." : "Generate Opportunities"}
+              {busy === "opportunities" ? "Generating…" : "Generate Opportunities"}
             </button>
             <button
-              className="primary-button"
-              onClick={() =>
-                run("specific-explanations", () =>
-                  generateSpecificExplanationsForCompany(company!.id)
-                )
-              }
+              className="secondary-button"
+              onClick={() => run("specific-explanations", () => generateSpecificExplanationsForCompany(company!.id))}
               disabled={busy !== null}
             >
-              {busy === "specific-explanations" ? "Explaining..." : "Generate Specific Explanations"}
+              {busy === "specific-explanations" ? "Explaining…" : "Generate Specific Explanations"}
             </button>
             <button
-              className="primary-button"
+              className="secondary-button"
               onClick={() => run("graph", () => buildExposureGraphForCompany(company!.id))}
               disabled={busy !== null}
             >
-              {busy === "graph" ? "Building..." : "Build Exposure Graph"}
+              {busy === "graph" ? "Building…" : "Build Exposure Graph"}
             </button>
           </section>
         )}
@@ -893,14 +1230,14 @@ function riskExposureSubtitle() {
     riskItems.length +
       operatingChanges.length +
       watchlistItems.length +
-      opportunities.length
+      publishedOpportunities.length
   )}
-  subtitle={`${riskItems.length} risks · ${operatingChanges.length} changes · ${watchlistItems.length} watch · ${opportunities.length} opportunities`}
+  subtitle={`${riskItems.length} risks · ${operatingChanges.length} changes · ${watchlistItems.length} watch · ${publishedOpportunities.length} opportunities`}
             explanation={explainDashboardMetric("executive_issues", {
   riskCount: riskItems.length,
   operatingChangeCount: operatingChanges.length,
   watchlistCount: watchlistItems.length,
-  opportunityCount: opportunities.length,
+  opportunityCount: publishedOpportunities.length,
 })}
           />
 
@@ -926,15 +1263,19 @@ function riskExposureSubtitle() {
 />
 
           <Metric
-            title="Opportunity Upside"
+            title="Candidate Upside"
             value={`${formatMoney(totalOpportunityLow)}–${formatMoney(
               totalOpportunityHigh
             )}`}
-            subtitle="Modeled upside"
+            subtitle={
+              publishedOpportunities.length === 0 && blockedOpportunityCount > 0
+                ? `No quality-approved opportunity · ${blockedOpportunityCount} candidate${blockedOpportunityCount > 1 ? "s" : ""} blocked`
+                : "Needs CRM/customer validation"
+            }
             explanation={explainDashboardMetric("opportunity_upside", {
               low: totalOpportunityLow,
               high: totalOpportunityHigh,
-              count: opportunities.length,
+              count: publishedOpportunities.length,
             })}
           />
 
@@ -943,7 +1284,7 @@ function riskExposureSubtitle() {
           <Metric
   title="Evidence Sources"
   value={String(uniqueEvidenceSources)}
-  subtitle={`${allEvidenceItems.length} evidence items · avg quality ${avgEvidenceQuality}/100`}
+  subtitle={`${allEvidenceItems.length} items · quality ${avgEvidenceQuality >= 70 ? "High" : avgEvidenceQuality >= 50 ? "Medium" : "Low"} (avg ${avgEvidenceQuality}/100)`}
   explanation={explainDashboardMetric("supporting_signals", {
     relevant: signalStats.relevantEvents,
     events: signalStats.rawEvents,
@@ -954,10 +1295,12 @@ function riskExposureSubtitle() {
           <Metric
             title="Open Actions"
             value={String(openActions)}
-            subtitle={`${actions.length} total actions`}
+            subtitle={actions.length > publishedActions.length
+              ? `${openActions} active · ${actions.length - publishedActions.length} blocked by quality gate`
+              : `${openActions} active`}
             explanation={explainDashboardMetric("open_actions", {
               open: openActions,
-              total: actions.length,
+              total: publishedActions.length,
             })}
           />
         </section>
@@ -965,54 +1308,37 @@ function riskExposureSubtitle() {
         {/* 2. Leadership Memo — compact structured preview */}
         <CompactMemoSection
           brief={brief}
-          executiveMemo={executiveMemo}
           company={company}
           riskItems={riskItems}
           operatingChanges={operatingChanges}
           watchlistItems={watchlistItems}
-          opportunities={opportunities}
+          opportunities={publishedOpportunities}
           openActions={openActions}
           totalRiskLow={totalRiskLow}
           totalRiskHigh={totalRiskHigh}
           totalOpportunityLow={totalOpportunityLow}
           totalOpportunityHigh={totalOpportunityHigh}
+          candidateQueueCount={candidateQueueItems.length}
+          quarantineCount={candidateQueueItems.filter(i => i.gateResult.decision === "quarantine").length}
+          reviewCount={candidateQueueItems.filter(i => i.gateResult.decision === "candidate_review").length}
+          totalGeneratedCount={opportunities.length + risks.length}
         />
 
-        {/* 3. Executive Actions */}
-        {actions.length > 0 && (
-          <section className="card">
-            <div className="card-header">
-              <div>
-                <p className="eyebrow">What to do next</p>
-                <h2 className="section-title">Executive Actions</h2>
-              </div>
-              <span className="badge">{openActions} open</span>
-            </div>
-            <div className="actions-compact-list">
-              {actions.slice(0, 6).map((action) => (
-                <div key={action.id} className="action-compact-row">
-                  <div className="action-compact-left">
-                    <p className="action-title">{action.title}</p>
-                    <p className="muted">
-                      {action.owner || "Unassigned"} · Due {action.deadline || "not set"}
-                    </p>
-                  </div>
-                  <select
-                    value={action.status || "open"}
-                    onChange={(event) => updateActionStatus(action.id, event.target.value)}
-                    className="status-select"
-                  >
-                    <option value="open">Open</option>
-                    <option value="in_review">In review</option>
-                    <option value="accepted">Accepted</option>
-                    <option value="dismissed">Dismissed</option>
-                    <option value="completed">Completed</option>
-                  </select>
-                </div>
-              ))}
-            </div>
-          </section>
+        {/* 3. Executive Actions + ROI */}
+        <ActionRoiPanel actions={actionRoiItems} onStatusChange={updateActionStatus} />
+
+        {/* 4. Driver Priority Map */}
+        {driverPriorityReport.drivers.length > 0 && (
+          <DriverPriorityMap
+            drivers={driverPriorityReport.drivers}
+            topDriver={driverPriorityReport.topDriver}
+            watchCount={driverPriorityReport.watchCount}
+            publishedIssueCount={riskItems.length + operatingChanges.length}
+          />
         )}
+
+        {/* 4b. Candidate Review Queue — items blocked by quality gate */}
+        <CandidateReviewQueue items={candidateQueueItems} />
 
         {/* 4. Risk Register */}
         <section className="card">
@@ -1033,17 +1359,26 @@ function riskExposureSubtitle() {
           {riskItems.length === 0 ? (
             <p className="muted">No downside risks generated yet.</p>
           ) : (
-            riskItems.map((risk, index) => (
-              <RiskCard
-                key={risk.id}
-                risk={risk}
-                displayRank={index + 1}
-                expanded={expandedRiskIds.has(risk.id)}
-                onToggle={() => toggleRiskId(risk.id)}
-                movement={getMovement(risk.risk_title, riskSnapshots, "risk_title")}
-                matchedConnections={matchedConnectionsByItemId[risk.id] || []}
-              />
-            ))
+            riskItems.map((risk, index) => {
+              const linkedRawAction = publishedActions.find((pa) => pa.risk_id === risk.id);
+              const ownerFromAction = linkedRawAction
+                ? (actionRoiItems.find((item) => item.id === linkedRawAction.id)?.owner ?? null)
+                : null;
+              return (
+                <RiskCard
+                  key={risk.id}
+                  risk={risk}
+                  displayRank={index + 1}
+                  expanded={expandedRiskIds.has(risk.id)}
+                  onToggle={() => toggleRiskId(risk.id)}
+                  movement={getMovement(risk.risk_title, riskSnapshots, "risk_title")}
+                  matchedConnections={matchedConnectionsByItemId[risk.id] || []}
+                  calibration={calibration}
+                  gateResult={_gateResults.get(risk.id)}
+                  ownerFromAction={ownerFromAction}
+                />
+              );
+            })
           )}
         </section>
 
@@ -1055,18 +1390,25 @@ function riskExposureSubtitle() {
               <h2 className="section-title">Opportunities</h2>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="badge">{opportunities.length} opportunities</span>
-              {opportunities.length > 0 && (
-                <button className="text-button" onClick={() => toggleAllOpportunitySection(opportunities.map(o => o.id))}>
-                  {opportunities.every(o => expandedOpportunityIds.has(o.id)) ? "Collapse all" : "Expand all"}
+              <span className="badge">{publishedOpportunities.length} opportunities</span>
+              {publishedOpportunities.length > 0 && (
+                <button className="text-button" onClick={() => toggleAllOpportunitySection(publishedOpportunities.map(o => o.id))}>
+                  {publishedOpportunities.every(o => expandedOpportunityIds.has(o.id)) ? "Collapse all" : "Expand all"}
                 </button>
               )}
             </div>
           </div>
-          {opportunities.length === 0 ? (
-            <p className="muted">No opportunities generated yet.</p>
+          {publishedOpportunities.length === 0 ? (
+            <div>
+              <p className="muted">No approved opportunities this cycle.</p>
+              {candidateQueueItems.filter(i => i.type === "opportunity").length > 0 && (
+                <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
+                  {candidateQueueItems.filter(i => i.type === "opportunity").length} candidate{candidateQueueItems.filter(i => i.type === "opportunity").length > 1 ? "s" : ""} require{candidateQueueItems.filter(i => i.type === "opportunity").length === 1 ? "s" : ""} review — see Candidate Review Queue below.
+                </p>
+              )}
+            </div>
           ) : (
-            opportunities.map((opportunity) => (
+            publishedOpportunities.map((opportunity) => (
               <OpportunityCard
                 key={opportunity.id}
                 opportunity={opportunity}
@@ -1128,21 +1470,37 @@ function riskExposureSubtitle() {
           </section>
         )}
 
-        {/* 8. Company Model — compact with expandable sections */}
+        {/* 8. Operating Model Completeness */}
+        <OperatingModelCompleteness
+          sections={modelCompletenessReport.sections}
+          overallCompleteness={modelCompletenessReport.overallCompleteness}
+        />
+
+        {/* 9. Forecast Accuracy / Outcome Tracking */}
+        <ForecastAccuracyPanel rows={forecastRows} />
+
+        {/* 9. Company Model — compact with expandable sections */}
         <CompanyModelSection company={company} entities={entities} getEntities={getEntities} />
 
-        {/* 9. Exposure Graph — top 3 + expand */}
+        {/* 9. Company Exposure Graph */}
         <section className="card">
           <div className="card-header">
             <div>
               <p className="eyebrow">Exposure graph</p>
-              <h2 className="section-title">Operating Exposure Paths</h2>
+              <h2 className="section-title">Company Exposure Graph</h2>
+              <p className="dashboard-subtitle" style={{ marginTop: 4, marginBottom: 0 }}>
+                Proprietary operating map connecting external drivers to Fastenal financial outcomes.
+              </p>
             </div>
-            <span className="badge">
-              {impactPaths.length > 0 ? `${impactPaths.length} paths` : edges.length > 0 ? `${edges.length} connections` : "0"}
-            </span>
           </div>
-          <GroupedExposurePaths paths={impactPaths} edges={edges} limit={3} />
+          <CompanyExposureGraph
+            impactPaths={impactPaths}
+            edges={edges}
+            freightRiskLow={freightRiskLow}
+            freightRiskHigh={freightRiskHigh}
+            publishedOpportunities={publishedOpportunities}
+            blockedOpportunityCandidates={blockedOpportunityCount}
+          />
         </section>
 
         {/* Raw events — advanced/developer view */}
@@ -1175,7 +1533,6 @@ function riskExposureSubtitle() {
 
 function CompactMemoSection({
   brief,
-  executiveMemo,
   company,
   riskItems,
   operatingChanges,
@@ -1186,9 +1543,12 @@ function CompactMemoSection({
   totalRiskHigh,
   totalOpportunityLow,
   totalOpportunityHigh,
+  candidateQueueCount = 0,
+  quarantineCount = 0,
+  reviewCount = 0,
+  totalGeneratedCount = 0,
 }: {
   brief: Brief | null;
-  executiveMemo: string;
   company: Company | null;
   riskItems: Risk[];
   operatingChanges: Risk[];
@@ -1199,27 +1559,29 @@ function CompactMemoSection({
   totalRiskHigh: number;
   totalOpportunityLow: number;
   totalOpportunityHigh: number;
+  candidateQueueCount?: number;
+  quarantineCount?: number;
+  reviewCount?: number;
+  totalGeneratedCount?: number;
 }) {
   const [briefExpanded, setBriefExpanded] = useState(false);
 
-  const topRisk = riskItems[0];
-  const topOpp = opportunities[0];
-  const topChange = operatingChanges[0];
+  const memoStructure = getMemoLine({
+    actNowRisks: riskItems.filter(r => getTriageBadge(r).label === "Act"),
+    validateRisks: riskItems.filter(r => getTriageBadge(r).label === "Validate"),
+    topOpp: opportunities[0] || null,
+    watchlistItems,
+    topChange: operatingChanges[0] || null,
+    openActions,
+    scenarioCount: riskItems.filter(r => getIssueModelStatus(r.methodology).status === "scenario_fallback").length,
+    needsCalibCount: riskItems.filter(r => getIssueModelStatus(r.methodology).status === "needs_calibration").length,
+    totalRiskLow,
+    totalRiskHigh,
+    totalOppLow: totalOpportunityLow,
+    totalOppHigh: totalOpportunityHigh,
+  });
 
-  const summaryLines = [
-    topRisk
-      ? `TOP RISK — ${topRisk.risk_title} · ${formatMoney(topRisk.impact_low)}–${formatMoney(topRisk.impact_high)} exposure · Priority ${topRisk.priority_score || 0}/100`
-      : null,
-    topOpp
-      ? `TOP OPPORTUNITY — ${topOpp.title} · ${formatMoney(topOpp.revenue_low)}–${formatMoney(topOpp.revenue_high)} upside`
-      : null,
-    topChange
-      ? `KEY CHANGE — ${topChange.risk_title}`
-      : null,
-    openActions > 0
-      ? `ACTIONS REQUIRED — ${openActions} open action${openActions !== 1 ? "s" : ""} pending`
-      : null,
-  ].filter(Boolean) as string[];
+  const summaryLines = memoStructure.map(m => ({ ...m }));
 
   return (
     <section className="card memo-section">
@@ -1231,17 +1593,30 @@ function CompactMemoSection({
         {brief ? (
           <span className="badge">{new Date(brief.created_at).toLocaleString()}</span>
         ) : (
-          <span className="badge">Preview</span>
+          <span className="badge">Executive brief preview</span>
         )}
       </div>
 
       {!briefExpanded ? (
-        <div className="memo-compact">
+        <div className="memo-compact memo-coo-format">
           {summaryLines.map((line, i) => (
-            <div key={i} className="memo-summary-line">
-              <span className="memo-summary-text">{line}</span>
+            <div key={i} className={`memo-summary-line ${line.className}`}>
+              <span className="memo-line-prefix">{line.prefix}</span>
+              <span className="memo-line-body">{line.text}</span>
             </div>
           ))}
+          {candidateQueueCount > 0 && (
+            <div className="memo-summary-line memo-gate-line">
+              <span className="memo-line-prefix">QUALITY GATE</span>
+              <span className="memo-line-body">
+                GroundSense reviewed {totalGeneratedCount} generated candidate{totalGeneratedCount !== 1 ? "s" : ""}.{" "}
+                {totalGeneratedCount - candidateQueueCount} published
+                {reviewCount > 0 ? `, ${reviewCount} sent to review` : ""}
+                {quarantineCount > 0 ? `, ${quarantineCount} quarantined` : ""}.{" "}
+                Blocked candidates are excluded from actions, forecasts, metrics, and executive brief until promoted.
+              </span>
+            </div>
+          )}
           {(brief || summaryLines.length > 0) && (
             <button className="text-button memo-expand-btn" onClick={() => setBriefExpanded(true)}>
               Open full brief →
@@ -1253,22 +1628,36 @@ function CompactMemoSection({
           <button className="text-button memo-expand-btn" onClick={() => setBriefExpanded(false)}>
             ▲ Collapse brief
           </button>
-          {brief ? (
-            <pre className="memo">{executiveMemo}</pre>
-          ) : (
-            <pre className="memo">{generateDashboardPreviewMemo({
-              company,
-              riskItems,
-              operatingChanges,
-              watchlistItems,
-              opportunities,
-              openActions,
-              totalRiskLow,
-              totalRiskHigh,
-              totalOpportunityLow,
-              totalOpportunityHigh,
-            })}</pre>
-          )}
+          <div className="memo-expanded-structured">
+            <p className="memo-expanded-header">GroundSense Operating Brief — {company?.name || "Company"}</p>
+            {summaryLines.map((line, i) => (
+              <div key={i} className={`memo-expanded-line ${line.className}`}>
+                <span className="memo-expanded-prefix">{line.prefix}</span>
+                <p className="memo-expanded-body">{line.text}</p>
+              </div>
+            ))}
+            <div className="memo-expanded-line memo-caveat">
+              <span className="memo-expanded-prefix">6. QUALITY GATE</span>
+              <p className="memo-expanded-body">
+                GroundSense reviewed {totalGeneratedCount} generated candidate{totalGeneratedCount !== 1 ? "s" : ""}.{" "}
+                {totalGeneratedCount - candidateQueueCount} were published to this brief
+                {candidateQueueCount > 0 ? (
+                  <>
+                    {", "}
+                    {reviewCount > 0 ? `${reviewCount} sent to review` : ""}
+                    {reviewCount > 0 && quarantineCount > 0 ? ", " : ""}
+                    {quarantineCount > 0 ? `${quarantineCount} quarantined` : ""}
+                    {" due to weak or misaligned evidence."}
+                  </>
+                ) : "."}
+                {" "}Blocked candidates are excluded from actions, forecasts, metrics, and executive brief until promoted. See Candidate Review Queue for details.
+              </p>
+            </div>
+            <div className="memo-expanded-line memo-caveat">
+              <span className="memo-expanded-prefix">7. LEARNING LOOP</span>
+              <p className="memo-expanded-body">Forecast records are open for quality-approved issues only. Realized outcomes will calibrate future company-specific exposure models.</p>
+            </div>
+          </div>
         </div>
       )}
     </section>
@@ -1322,83 +1711,6 @@ function CompanyModelSection({
       </div>
     </section>
   );
-}
-
-function generateDashboardPreviewMemo({
-  company,
-  riskItems,
-  operatingChanges,
-  watchlistItems,
-  opportunities,
-  openActions,
-  totalRiskLow,
-  totalRiskHigh,
-  totalOpportunityLow,
-  totalOpportunityHigh,
-}: {
-  company: any;
-  riskItems: Risk[];
-  operatingChanges: Risk[];
-  watchlistItems: Risk[];
-  opportunities: Opportunity[];
-  openActions: number;
-  totalRiskLow: number;
-  totalRiskHigh: number;
-  totalOpportunityLow: number;
-  totalOpportunityHigh: number;
-}): string {
-  const lines: string[] = [];
-  const name = company?.name || "the company";
-  const date = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-
-  lines.push(`INTELLIGENCE SUMMARY — ${name.toUpperCase()}`);
-  lines.push(`As of ${date}  |  GroundSense preview (no brief generated yet)`);
-  lines.push("");
-
-  if (riskItems.length > 0) {
-    const top = riskItems[0];
-    const topStatus = getIssueModelStatus(top.methodology);
-    lines.push(`TOP RISK: ${top.risk_title}`);
-    lines.push(`  Exposure: ${formatMoney(top.impact_low)}–${formatMoney(top.impact_high)}  |  Priority: ${top.priority_score || 0}/100  |  Model basis: ${topStatus.label}`);
-    // Only include free-text summary if evidence-backed (avoids leaking rejected shock values like "109%")
-    if (topStatus.status === "evidence_backed" && (top.executive_summary || top.what_happened)) {
-      lines.push(`  ${(top.executive_summary || top.what_happened || "").slice(0, 160)}`);
-    } else if (top.decision_required || top.action_required) {
-      lines.push(`  Action: ${(top.decision_required || top.action_required || "").slice(0, 140)}`);
-    }
-    lines.push("");
-  }
-
-  if (operatingChanges.length > 0) {
-    const top = operatingChanges[0];
-    lines.push(`OPERATING CHANGE: ${top.risk_title}`);
-    if (top.exposure_interpretation || top.business_impact) {
-      lines.push(`  ${(top.exposure_interpretation || top.business_impact || "").slice(0, 160)}`);
-    }
-    lines.push("");
-  }
-
-  if (opportunities.length > 0) {
-    const top = opportunities[0];
-    lines.push(`OPPORTUNITY: ${top.title}`);
-    lines.push(`  Upside: ${formatMoney(top.revenue_low)}–${formatMoney(top.revenue_high)}`);
-    if (top.summary) lines.push(`  ${top.summary.slice(0, 160)}`);
-    lines.push("");
-  } else if (watchlistItems.length > 0) {
-    lines.push(`WATCHLIST: ${watchlistItems[0].risk_title} — monitoring, not yet modeled.`);
-    lines.push("");
-  }
-
-  lines.push("RISK EXPOSURE SUMMARY");
-  lines.push(`  Total modeled downside: ${formatMoney(totalRiskLow)}–${formatMoney(totalRiskHigh)} across ${riskItems.length} risk${riskItems.length !== 1 ? "s" : ""}`);
-  if (totalOpportunityHigh > 0) {
-    lines.push(`  Total modeled upside: ${formatMoney(totalOpportunityLow)}–${formatMoney(totalOpportunityHigh)} across ${opportunities.length} opportunit${opportunities.length !== 1 ? "ies" : "y"}`);
-  }
-  lines.push(`  Open actions: ${openActions}`);
-  lines.push("");
-  lines.push("Run 'Generate Brief' for a full AI-authored memo with source citations.");
-
-  return lines.join("\n");
 }
 
 const GROUP_LABELS: Record<string, { label: string; description: string }> = {
@@ -1507,7 +1819,11 @@ function GroupedExposurePaths({
                 <div className="exposure-path-chain">{p.pathChain}</div>
                 <div className="exposure-path-meta">
                   {p.exposureHigh != null && p.exposureHigh > 0 && (
-                    <span className="exposure-path-amount">{formatMoney(p.exposureHigh)} exposure</span>
+                    <span className="exposure-path-amount">
+                      {p.group === "competitor"
+                        ? `${formatMoney(p.exposureHigh)} revenue base potentially influenced`
+                        : `${formatMoney(p.exposureHigh)} exposure`}
+                    </span>
                   )}
                   {p.calibration && (
                     <span className="exposure-path-calibration">{p.calibration.replace(/_/g, " ")}</span>
@@ -1533,6 +1849,216 @@ function GroupedExposurePaths({
   );
 }
 
+function CompanyExposureGraph({
+  impactPaths,
+  edges,
+  freightRiskLow,
+  freightRiskHigh,
+  publishedOpportunities,
+  blockedOpportunityCandidates,
+}: {
+  impactPaths: ImpactPath[];
+  edges: ExposureEdge[];
+  freightRiskLow: number;
+  freightRiskHigh: number;
+  publishedOpportunities: Opportunity[];
+  blockedOpportunityCandidates: number;
+}) {
+  const [showRaw, setShowRaw] = useState(false);
+
+  return (
+    <div className="gs-exposure-graph">
+      <style>{`
+        .gs-exposure-graph { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #2b2118; }
+        .gs-eg-section { margin-bottom: 20px; }
+        .gs-eg-section-title {
+          font-size: 11px; font-weight: 700; text-transform: uppercase;
+          letter-spacing: 0.07em; color: #7a6a5d; margin: 0 0 10px;
+        }
+        .gs-eg-path {
+          border: 1px solid #e7dccd; border-radius: 10px; padding: 12px 14px;
+          margin-bottom: 8px; background: #fefcf8;
+        }
+        .gs-eg-path-chain {
+          font-size: 14px; font-weight: 620; color: #2b2118; line-height: 1.4;
+          margin: 0 0 6px;
+        }
+        .gs-eg-path-meta {
+          display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
+          font-size: 12px; color: #7a6a5d; margin-bottom: 4px;
+        }
+        .gs-eg-status-badge {
+          display: inline-block; font-size: 11px; font-weight: 650;
+          padding: 2px 7px; border-radius: 4px; white-space: nowrap;
+        }
+        .gs-eg-status-active { background: #fff0e6; color: #7a3a0a; }
+        .gs-eg-status-validate { background: #f0f4ff; color: #2a3a8a; }
+        .gs-eg-status-watch { background: #f4f4f4; color: #5c5c5c; }
+        .gs-eg-status-candidate { background: #f0faf4; color: #2b6b3a; }
+        .gs-eg-missing {
+          font-size: 11px; color: #9a8070; font-style: italic; margin-top: 3px;
+        }
+        .gs-eg-raw-toggle {
+          font-size: 12px; color: #9a8070; cursor: pointer; background: none;
+          border: none; padding: 4px 0; text-decoration: underline;
+        }
+        .gs-eg-sensitivity {
+          display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+          margin-top: 8px;
+        }
+        .gs-eg-sensitivity-item {
+          background: #f7f1e8; border-radius: 8px; padding: 8px 10px;
+          font-size: 12px; color: #5c4e3a;
+        }
+        .gs-eg-sensitivity-label { font-weight: 650; display: block; margin-bottom: 2px; }
+      `}</style>
+
+      {/* 1. Active exposure paths */}
+      <div className="gs-eg-section">
+        <p className="gs-eg-section-title">Active exposure paths</p>
+
+        <div className="gs-eg-path">
+          <p className="gs-eg-path-chain">Freight → Logistics cost → Manufacturing fulfillment → Gross margin</p>
+          <div className="gs-eg-path-meta">
+            <span className="gs-eg-status-badge gs-eg-status-active">Active scenario downside</span>
+            <span>{formatMoney(freightRiskLow)}–{formatMoney(freightRiskHigh)} scenario range</span>
+          </div>
+          <p className="gs-eg-missing">Missing links: lane-level spend, contract coverage by lane, surcharge exposure</p>
+        </div>
+
+        <div className="gs-eg-path">
+          <p className="gs-eg-path-chain">Steel / tariff policy → Landed cost → Product margin → Gross margin</p>
+          <div className="gs-eg-path-meta">
+            <span className="gs-eg-status-badge gs-eg-status-validate">Validate operating change</span>
+            <span>$525K residual exposure · $350K potential relief</span>
+          </div>
+          <p className="gs-eg-missing">Missing links: supplier country-of-origin, SKU landed cost, open PO exposure</p>
+        </div>
+      </div>
+
+      {/* 2. Candidate opportunity paths */}
+      <div className="gs-eg-section">
+        <p className="gs-eg-section-title">Candidate opportunity paths</p>
+        {publishedOpportunities.length > 0 ? (
+          publishedOpportunities.map(o => (
+            <div key={o.id} className="gs-eg-path">
+              <p className="gs-eg-path-chain">{(o.exposure_path || []).join(" → ") || "Demand → Revenue / gross margin"}</p>
+              <div className="gs-eg-path-meta">
+                <span className="gs-eg-status-badge gs-eg-status-candidate">Needs validation</span>
+                <span>{formatMoney(o.revenue_low)}–{formatMoney(o.revenue_high)} candidate upside</span>
+              </div>
+              <p className="gs-eg-missing">Missing links: CRM pipeline by account, quote volume trend, customer order growth</p>
+            </div>
+          ))
+        ) : (
+          <div className="gs-eg-path">
+            <p className="gs-eg-path-chain" style={{ color: "#9a8070", fontStyle: "italic" }}>No approved opportunity path this cycle.</p>
+            {blockedOpportunityCandidates > 0 && (
+              <p className="gs-eg-missing">
+                {blockedOpportunityCandidates} opportunity candidate{blockedOpportunityCandidates > 1 ? "s" : ""} blocked by quality gate — see Candidate Review Queue.
+              </p>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* 3. Watch paths */}
+      <div className="gs-eg-section">
+        <p className="gs-eg-section-title">Watch paths</p>
+        <div className="gs-eg-path">
+          <p className="gs-eg-path-chain">Grainger / MSC / Applied → Competitive pressure → Manufacturing accounts → Revenue retention</p>
+          <div className="gs-eg-path-meta">
+            <span className="gs-eg-status-badge gs-eg-status-watch">Watch</span>
+            <span>Revenue base potentially influenced — not modeled loss</span>
+          </div>
+          <p className="gs-eg-missing">Missing links: win/loss data, pricing changes, account displacement signals</p>
+        </div>
+      </div>
+
+      {/* 4. Sensitivity */}
+      <div className="gs-eg-section">
+        <p className="gs-eg-section-title">Sensitivity</p>
+        <div className="gs-eg-sensitivity">
+          <div className="gs-eg-sensitivity-item">
+            <span className="gs-eg-sensitivity-label">Steel +1% move</span>
+            Margin sensitivity: ~$1.5M unpassed exposure
+          </div>
+          <div className="gs-eg-sensitivity-item">
+            <span className="gs-eg-sensitivity-label">Freight +1% move</span>
+            Logistics sensitivity: ~$252K on spot-exposed spend
+          </div>
+          <div className="gs-eg-sensitivity-item">
+            <span className="gs-eg-sensitivity-label">Backorder rate +1pt</span>
+            Revenue leakage: sensitive to fill-rate SLA breach
+          </div>
+        </div>
+      </div>
+
+      {/* View all raw paths toggle */}
+      {(impactPaths.length > 0 || edges.length > 0) && (
+        <>
+          <button className="gs-eg-raw-toggle" onClick={() => setShowRaw(v => !v)}>
+            {showRaw ? "Hide raw paths" : `View all raw paths (${impactPaths.length > 0 ? impactPaths.length : edges.length})`}
+          </button>
+          {showRaw && (
+            <GroupedExposurePaths paths={impactPaths} edges={edges} />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function QualityGateReport({ gateResult }: { gateResult: IssueGateResult }) {
+  const [open, setOpen] = useState(false);
+  const score = gateResult.qualityScore;
+  const scoreColor = score >= 60 ? "#2b6b3a" : score >= 35 ? "#7a5c2b" : "#8a3a1a";
+  return (
+    <div style={{ borderTop: "1px solid #e7dccd", marginTop: 12, paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setOpen(v => !v)}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "#7a6a5d", textTransform: "uppercase", letterSpacing: "0.06em" }}>Quality Gate Report</span>
+        <span style={{ fontSize: 11, background: "#e8f5ec", color: "#2b6b3a", fontWeight: 650, padding: "1px 7px", borderRadius: 4 }}>Published ✓</span>
+        <span style={{ fontSize: 12, color: scoreColor, marginLeft: "auto" }}>Quality {score}/100</span>
+        <button className="text-button" style={{ fontSize: 12 }}>{open ? "Collapse ▲" : "Show ▼"}</button>
+      </div>
+      {open && (
+        <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+          {[
+            { label: "Evidence alignment", value: gateResult.evidenceAlignmentScore },
+            { label: "Company relevance", value: gateResult.companyRelevanceScore },
+            { label: "Overall quality", value: gateResult.qualityScore },
+          ].map(({ label, value }) => {
+            const c = value >= 60 ? "#22c55e" : value >= 35 ? "#f59e0b" : "#ef4444";
+            return (
+              <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <span style={{ color: "#7a6a5d", width: 140, flexShrink: 0 }}>{label}</span>
+                <div style={{ flex: 1, height: 6, background: "#e7dccd", borderRadius: 3, maxWidth: 120 }}>
+                  <div style={{ width: `${value}%`, height: "100%", background: c, borderRadius: 3 }} />
+                </div>
+                <span style={{ color: "#5c4e3a", fontWeight: 600 }}>{value}%</span>
+              </div>
+            );
+          })}
+          <div style={{ fontSize: 12, color: "#5c4e3a", marginTop: 4 }}>
+            <span style={{ fontWeight: 650, color: "#7a6a5d" }}>Forecast eligible: </span>
+            {gateResult.forecastEligible ? "Yes" : "No — requires calibration or validation"}
+          </div>
+          <div style={{ fontSize: 12, color: "#5c4e3a" }}>
+            <span style={{ fontWeight: 650, color: "#7a6a5d" }}>Evidence reviewed: </span>
+            {gateResult.evidenceCount} items · {gateResult.alignedCount} aligned · {gateResult.irrelevantCount} unrelated
+          </div>
+          {gateResult.requiredToPromote.length > 0 && (
+            <div style={{ fontSize: 12, color: "#5c4e3a" }}>
+              <span style={{ fontWeight: 650, color: "#7a6a5d" }}>What would improve: </span>
+              {gateResult.requiredToPromote[0]}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RiskCard({
   risk,
   displayRank,
@@ -1540,6 +2066,9 @@ function RiskCard({
   onToggle,
   movement,
   matchedConnections,
+  calibration,
+  gateResult,
+  ownerFromAction,
 }: {
   risk: Risk;
   displayRank: number;
@@ -1547,11 +2076,14 @@ function RiskCard({
   onToggle: () => void;
   movement: string;
   matchedConnections: MatchedConnectionPath[];
+  calibration?: CompanyCalibrationInput | null;
+  gateResult?: IssueGateResult | null;
+  ownerFromAction?: string | null;
 }) {
   const modelStatus = getIssueModelStatus(risk.methodology);
-  const rejectedVals = formatRejectedShockValuesForRisk(risk);
-  const isScenarioWithRejected = modelStatus.status === "scenario_fallback" && !!rejectedVals;
-  const takeaway = (risk.executive_summary || risk.what_happened || "").slice(0, 240);
+  const takeaway = getRiskSummary(risk).slice(0, 280);
+  const movementLabel = formatMovementLabel(movement);
+  const decisionTrigger = getTrustSafeDecisionTrigger(risk);
 
   return (
     <div className="record-card">
@@ -1562,8 +2094,8 @@ function RiskCard({
               #{displayRank} {modelStatus.status === "scenario_fallback" ? "Scenario Risk" : "Risk"}
             </span>
             <ModelStatusBadge methodology={risk.methodology} />
-            {movement && movement !== "—" && movement !== "New" && (
-              <span className="movement-chip">{movement}</span>
+            {movementLabel && movementLabel !== "Unchanged" && (
+              <span className="movement-chip">{movementLabel}</span>
             )}
           </div>
           <h3 className="record-title">{risk.risk_title}</h3>
@@ -1580,14 +2112,14 @@ function RiskCard({
           explanation={explainRiskPriority(risk)}
         />
         <Mini
-          label="Likelihood est."
-          value={`${risk.probability || 0}%`}
+          label="Scenario confidence"
+          value={`${clampPercent(risk.probability)}%`}
           explanation={{
-            title: "Likelihood estimate",
+            title: "Scenario confidence",
             formula: "Stored risk_register.probability",
             inputs: [
-              `Estimate: ${risk.probability || 0}%`,
-              `Confidence: ${risk.confidence || 0}%`,
+              `Estimate: ${clampPercent(risk.probability)}%`,
+              `Confidence: ${clampPercent(risk.confidence)}% (${formatConfidenceLabel(risk.confidence)})`,
               `Supporting events: ${risk.supporting_event_count || 0}`,
             ],
             source: "Generated by Generate Risks from relevant event assessments.",
@@ -1606,30 +2138,40 @@ function RiskCard({
         <p className="card-takeaway">{takeaway}</p>
       )}
 
-      {(risk.decision_required || risk.action_required) && (
-        <div className="card-action-line">
-          <span className="card-action-label">Recommended action</span>
-          <span className="card-action-text">
-            {(risk.decision_required || risk.action_required || "").slice(0, 160)}
-          </span>
-        </div>
-      )}
+      <div className="card-action-line">
+        <span className="card-action-label">Decision trigger</span>
+        <span className="card-action-text">{decisionTrigger}</span>
+      </div>
 
       {expanded && (
-        <DetailPanel
-          methodology={risk.methodology}
-          evidence={risk.evidence_items || []}
-          exposurePath={risk.exposure_path || []}
-          expectedBenefit={risk.expected_benefit}
-          matchedConnections={matchedConnections}
-          overviewContent={{
-            whatChanged: risk.what_happened || risk.executive_summary,
-            whyNow: risk.why_now,
-            businessImpact: risk.risk_interaction || risk.business_impact,
-            modelNote: isScenarioWithRejected ? rejectedVals : null,
-          }}
-          issueForPath={risk}
-        />
+        <>
+          <DetailPanel
+            methodology={risk.methodology}
+            evidence={risk.evidence_items || []}
+            exposurePath={risk.exposure_path || []}
+            expectedBenefit={risk.expected_benefit}
+            matchedConnections={matchedConnections}
+            overviewContent={{
+              whatChanged: getRiskWhatChanged(risk),
+              whyNow: getRiskWhyNow(risk),
+              businessImpact: getRiskBusinessImpact(risk),
+            }}
+            issueForPath={risk}
+          />
+          {(isFreightIssue(risk) || isTariffIssue(risk) || risk.issue_category?.includes("commodity")) && (
+            <ScenarioEditor
+              mode={isFreightIssue(risk) ? "freight" : "commodity"}
+              calibration={calibration ?? undefined}
+            />
+          )}
+          <DecisionMemoryPanel
+            issueId={risk.id}
+            issueTitle={risk.risk_title}
+            issueType="risk"
+            ownerFromAction={ownerFromAction}
+          />
+          {gateResult && <QualityGateReport gateResult={gateResult} />}
+        </>
       )}
     </div>
   );
@@ -1646,14 +2188,17 @@ function OperatingChangeCard({
   onToggle: () => void;
   matchedConnections: MatchedConnectionPath[];
 }) {
-  const explanation = getOperatingChangeExplanation(risk);
+  const safeExplanation = getOperatingChangeSummary(risk);
+  const safeDecisionTrigger = getTrustSafeDecisionTrigger(risk);
+  const isCompetitor = /competitor|competition|market.?share/i.test(risk.issue_category || risk.risk_title || "");
+  const opChangeLabel = isCompetitor ? "Competitive Exposure Base" : "Operating Change";
 
   return (
     <div className="record-card operating-change-card">
       <div className="record-top">
         <div>
           <div className="record-badge-row">
-            <span className="blue-badge">Operating Change</span>
+            <span className="blue-badge">{opChangeLabel}</span>
             <span className="direction-chip">{formatIssueDirection(risk.issue_direction)}</span>
           </div>
           <h3 className="record-title">{risk.risk_title}</h3>
@@ -1669,21 +2214,20 @@ function OperatingChangeCard({
           value={getResidualExposureDisplay(risk)}
           explanation={explainRiskExposure(risk)}
         />
-        <Mini label="Confidence" value={`${risk.confidence || 0}%`} />
+        <Mini
+          label="Confidence"
+          value={`${clampPercent(risk.confidence)}% · ${formatConfidenceLabel(risk.confidence)}`}
+        />
       </div>
 
-      {explanation && (
-        <p className="card-takeaway">{explanation.slice(0, 280)}</p>
+      {safeExplanation && (
+        <p className="card-takeaway">{safeExplanation}</p>
       )}
 
-      {(risk.decision_required || risk.action_required) && (
-        <div className="card-action-line">
-          <span className="card-action-label">Recommended action</span>
-          <span className="card-action-text">
-            {(risk.decision_required || risk.action_required || "").slice(0, 160)}
-          </span>
-        </div>
-      )}
+      <div className="card-action-line">
+        <span className="card-action-label">Decision trigger</span>
+        <span className="card-action-text">{safeDecisionTrigger}</span>
+      </div>
 
       {expanded && (
         <DetailPanel
@@ -1694,7 +2238,7 @@ function OperatingChangeCard({
           matchedConnections={matchedConnections}
           sectionType="operating_changes"
           overviewContent={{
-            whatChanged: risk.what_happened || risk.executive_summary,
+            whatChanged: getOperatingChangeSummary(risk),
             whyNow: risk.why_now,
             businessImpact: risk.risk_interaction || risk.business_impact,
           }}
@@ -1716,8 +2260,8 @@ function WatchlistCard({
   onToggle: () => void;
   matchedConnections: MatchedConnectionPath[];
 }) {
-  const watchlistExplanation = getWatchlistExplanation(risk);
-  const upgradeText = getWatchlistUpgradeText(risk);
+  const watchlistExplanation = getWatchlistSummary(risk);
+  const upgradeText = getWatchlistUpgradeTrigger(risk);
 
   return (
     <div className="record-card watchlist-card-compact">
@@ -1725,14 +2269,14 @@ function WatchlistCard({
         <div className="watchlist-compact-left">
           <div className="record-badge-row">
             <span className="gray-badge">Watchlist</span>
-            <span className="watchlist-confidence-chip">{risk.confidence || 0}% conf.</span>
+            <span className="watchlist-confidence-chip">{clampPercent(risk.confidence)}% conf.</span>
             <span className="direction-chip direction-chip-sm">{formatIssueDirection(risk.issue_direction || "uncertain")}</span>
           </div>
           <h3 className="watchlist-compact-title">{risk.risk_title}</h3>
-          <p className="watchlist-compact-body">{(watchlistExplanation || "").slice(0, 220)}</p>
+          <p className="watchlist-compact-body">{watchlistExplanation}</p>
           {upgradeText && !expanded && (
             <p className="watchlist-upgrade-hint">
-              <span className="watchlist-upgrade-label">Upgrade trigger:</span> {upgradeText.slice(0, 140)}
+              <span className="watchlist-upgrade-label">Upgrade trigger:</span> {upgradeText}
             </p>
           )}
         </div>
@@ -1766,9 +2310,15 @@ function WatchlistCard({
     </div>
   );
 }
-function getOpportunityQuality(opportunity: Opportunity): "qualified" | "candidate" {
+function getOpportunityQuality(opportunity: Opportunity): "validated" | "candidate" | "needs_validation" {
   const evidence: any[] = opportunity.evidence_items || [];
   const summary = String(opportunity.summary || opportunity.title || "").toLowerCase();
+  const modelStatus = getIssueModelStatus(opportunity.methodology);
+
+  if (evidence.length === 0) return "needs_validation";
+
+  // Unknown model status = no methodology data = cannot validate
+  if (modelStatus.status === "unknown") return "needs_validation";
 
   const hasCompanySpecific = evidence.some((item: any) => {
     const text = [item.title, item.source, item.why_it_matters, item.impact_type]
@@ -1785,6 +2335,8 @@ function getOpportunityQuality(opportunity: Opportunity): "qualified" | "candida
       !/\b(fastenal|fast|fastn)\b/.test(text);
   });
 
+  if (allBroadMarket && evidence.length <= 2) return "needs_validation";
+
   if (allBroadMarket || (!hasCompanySpecific && evidence.length <= 3)) {
     return "candidate";
   }
@@ -1793,7 +2345,7 @@ function getOpportunityQuality(opportunity: Opportunity): "qualified" | "candida
     return "candidate";
   }
 
-  return "qualified";
+  return "validated";
 }
 
 function OpportunityCard({
@@ -1810,25 +2362,32 @@ function OpportunityCard({
   matchedConnections: MatchedConnectionPath[];
 }) {
   const quality = getOpportunityQuality(opportunity);
-  const isCandidate = quality === "candidate";
+  const movementLabel = formatMovementLabel(movement);
+  const decisionTrigger = getTrustSafeDecisionTrigger(opportunity);
+
+  const qualityLabel =
+    quality === "validated" ? "Validated Opportunity"
+    : quality === "candidate" ? "Opportunity Candidate"
+    : "Needs Validation";
+
+  const qualityBadgeClass =
+    quality === "validated" ? "green-badge"
+    : quality === "candidate" ? "amber-badge"
+    : "gray-badge";
 
   return (
     <div className="record-card">
       <div className="record-top">
         <div>
           <div className="record-badge-row">
-            {isCandidate ? (
-              <span className="amber-badge">Opportunity candidate</span>
-            ) : (
-              <span className="green-badge">
-                #{opportunity.opportunity_rank || "-"} Opportunity
-              </span>
-            )}
-            {movement && movement !== "—" && movement !== "New" && (
-              <span className="movement-chip">{movement}</span>
+            <span className={qualityBadgeClass}>
+              {quality === "validated" ? `#${opportunity.opportunity_rank || "-"} ` : ""}{qualityLabel}
+            </span>
+            {movementLabel && movementLabel !== "Unchanged" && (
+              <span className="movement-chip">{movementLabel}</span>
             )}
           </div>
-          <h3 className="record-title">{opportunity.title}</h3>
+          <h3 className="record-title">{getOpportunityTitle(opportunity)}</h3>
         </div>
         <button className="text-button" onClick={onToggle}>
           {expanded ? "Hide analysis" : "View analysis →"}
@@ -1837,13 +2396,19 @@ function OpportunityCard({
 
       <div className="mini-grid mini-grid-3">
         <Mini
-          label={isCandidate ? "Directional upside" : "Potential upside"}
+          label={quality === "validated" ? "Potential upside" : isManufacturingOpportunity(opportunity) ? "Candidate upside range" : "Directional upside"}
           value={`${formatMoney(opportunity.revenue_low)}–${formatMoney(opportunity.revenue_high)}`}
           explanation={explainOpportunityExposure(opportunity)}
         />
         <Mini
           label="Confidence"
-          value={`${opportunity.confidence || 0}%`}
+          value={
+            quality === "needs_validation"
+              ? "Needs validation"
+              : quality === "candidate"
+              ? `${formatConfidenceLabel(opportunity.confidence)} (directional)`
+              : `${clampPercent(opportunity.confidence)}% · ${formatConfidenceLabel(opportunity.confidence)}`
+          }
         />
         <Mini
           label="Priority"
@@ -1852,22 +2417,23 @@ function OpportunityCard({
         />
       </div>
 
-      {opportunity.summary && (
-        <p className="card-takeaway">{opportunity.summary.slice(0, 280)}</p>
+      {(opportunity.summary || isManufacturingOpportunity(opportunity)) && (
+        <p className="card-takeaway">
+          {getOpportunitySummary(opportunity).slice(0, 280)}
+        </p>
       )}
 
-      {isCandidate && (
-        <p className="candidate-note">Directional only — broad market signals, not company-specific data. Upgrade requires earnings confirmation or segment evidence.</p>
+      {quality === "candidate" && (
+        <p className="candidate-note">Candidate — broad market signals, not company-specific. Upgrade requires earnings confirmation or segment data.</p>
+      )}
+      {quality === "needs_validation" && (
+        <p className="candidate-note candidate-note-warn">Needs validation — insufficient evidence to size upside. Add company-specific data before acting.</p>
       )}
 
-      {(opportunity.decision_required || opportunity.action_required) && (
-        <div className="card-action-line">
-          <span className="card-action-label">Recommended action</span>
-          <span className="card-action-text">
-            {(opportunity.decision_required || opportunity.action_required || "").slice(0, 160)}
-          </span>
-        </div>
-      )}
+      <div className="card-action-line">
+        <span className="card-action-label">Decision trigger</span>
+        <span className="card-action-text">{decisionTrigger}</span>
+      </div>
 
       {expanded && (
         <DetailPanel
@@ -1878,8 +2444,8 @@ function OpportunityCard({
           matchedConnections={matchedConnections}
           sectionType="opportunity"
           overviewContent={{
-            whatChanged: opportunity.what_happened || (opportunity as any).executive_summary,
-            whyNow: (opportunity as any).why_now,
+            whatChanged: getOpportunityWhatChanged(opportunity),
+            whyNow: getOpportunityWhyNow(opportunity),
             businessImpact: (opportunity as any).business_impact,
           }}
           issueForPath={opportunity}
@@ -2090,6 +2656,20 @@ function DetailPanel({
             ) : (
               <p className="muted">No impact path available. Run Build Exposure Graph to generate paths.</p>
             )}
+          </div>
+
+          {issueForPath && "risk_title" in issueForPath && (issueForPath as Risk).issue_category && (
+            <div className="analysis-overview-row" style={{ marginTop: 8 }}>
+              <span className="analysis-ov-label">Driver category</span>
+              <span className="analysis-ov-text">{String((issueForPath as Risk).issue_category || "").replace(/_/g, " ")}</span>
+            </div>
+          )}
+
+          <div className="analysis-placeholder-row">
+            <div className="analysis-placeholder">
+              <span className="placeholder-title">Directional P&amp;L Bridge</span>
+              <span className="placeholder-body">{getIssuePLBridge(issueForPath)}</span>
+            </div>
           </div>
         </div>
       )}
@@ -2577,6 +3157,166 @@ function clampScore(value: unknown) {
   return Math.max(0, Math.min(100, Math.round(n)));
 }
 
+function clampPercent(value: unknown): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function formatConfidenceLabel(value: unknown): "High" | "Medium" | "Low" | "Needs validation" {
+  const n = clampPercent(value);
+  if (n >= 75) return "High";
+  if (n >= 50) return "Medium";
+  if (n >= 25) return "Low";
+  return "Needs validation";
+}
+
+function formatMovementLabel(raw: string): string {
+  if (!raw || raw === "—" || raw === "null" || raw === "undefined") return "";
+  if (raw === "New") return "New";
+  if (raw === "Unchanged") return "Unchanged";
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return "";
+  if (n === 0) return "Unchanged";
+  return n > 0 ? `▲${n}` : `▼${Math.abs(n)}`;
+}
+
+function formatEstimateQuality(methodology?: Methodology | null): string {
+  const status = getIssueModelStatus(methodology);
+  if (status.status === "evidence_backed") return "Article-verified";
+  if (status.status === "scenario_fallback") return "Scenario range";
+  if (status.status === "needs_calibration") return "Needs company validation";
+  return "Partially grounded";
+}
+
+function getTriageBadge(issue: Risk): { label: "Act" | "Validate" | "Watch" | "Ignore"; className: string } {
+  const status = getIssueModelStatus(issue.methodology);
+  const score = Number(issue.priority_score || 0);
+
+  if (issue.display_section === "watchlist") {
+    return { label: "Watch", className: "triage-badge triage-watch" };
+  }
+  if (status.status === "needs_calibration") {
+    return { label: "Validate", className: "triage-badge triage-validate" };
+  }
+  if (score >= 68) {
+    return { label: "Act", className: "triage-badge triage-act" };
+  }
+  if (score >= 40) {
+    return { label: "Validate", className: "triage-badge triage-validate" };
+  }
+  return { label: "Watch", className: "triage-badge triage-watch" };
+}
+
+
+function getDecisionTrigger(issue: Risk | Opportunity): string {
+  const typed = issue as any;
+  if (typed.decision_required && String(typed.decision_required).trim()) {
+    return String(typed.decision_required).trim().slice(0, 150);
+  }
+  const status = getIssueModelStatus(typed.methodology);
+  if (status.status === "needs_calibration") {
+    return "Confirm calibration inputs before escalating. Add missing company data, then regenerate.";
+  }
+  if (status.status === "scenario_fallback") {
+    return "Validate when a specific, company-verified shock percentage or announcement becomes available.";
+  }
+  if (typed.display_section === "watchlist") {
+    return "Upgrade to active risk when a direct adverse signal with company-specific evidence arrives.";
+  }
+  return "Monitor for escalation. Assign owner when priority exceeds threshold.";
+}
+
+function getConfidenceDecomposition(
+  methodology?: Methodology | null,
+  evidence?: any[],
+  issue?: Risk | Opportunity | null
+): Array<{ label: string; value: string; level: "High" | "Medium" | "Low" | "Needs validation" }> {
+  const status = getIssueModelStatus(methodology);
+  const items = Array.isArray(evidence) ? evidence : [];
+  const avgQuality = items.length > 0
+    ? Math.round(items.reduce((s, e) => s + (Number(e.source_quality) || 50), 0) / items.length)
+    : 0;
+
+  const evidenceLevel =
+    items.length >= 5 && avgQuality >= 65 ? "High"
+    : items.length >= 2 ? "Medium"
+    : items.length > 0 ? "Low"
+    : "Needs validation";
+
+  const mappingLevel =
+    status.status === "evidence_backed" ? "High"
+    : status.status === "scenario_fallback" ? "Medium"
+    : "Needs validation";
+
+  const hasBase = !!methodology?.base_exposure_value;
+  const exposureLevel =
+    hasBase && status.status === "evidence_backed" ? "High"
+    : hasBase ? "Medium"
+    : "Needs validation";
+
+  const typed = issue as any;
+  const hasAction = !!(typed?.decision_required || typed?.action_required);
+  const actionLevel = hasAction ? "Medium" : "Needs validation" as const;
+
+  return [
+    {
+      label: "Evidence confidence",
+      value: items.length > 0 ? `${items.length} item${items.length !== 1 ? "s" : ""}, avg quality ${avgQuality}/100` : "No evidence paired",
+      level: evidenceLevel,
+    },
+    {
+      label: "Mapping confidence",
+      value: status.status === "evidence_backed" ? "Direct article match" : status.status === "scenario_fallback" ? "Scenario assumption" : "Not mapped",
+      level: mappingLevel,
+    },
+    {
+      label: "Exposure confidence",
+      value: methodology?.base_exposure_value ? `Base: ${formatMoney(methodology.base_exposure_value)}` : "No base exposure stored",
+      level: exposureLevel,
+    },
+    {
+      label: "Action confidence",
+      value: typed?.decision_required ? String(typed.decision_required).slice(0, 80) : "No explicit action specified",
+      level: actionLevel,
+    },
+  ];
+}
+
+
+function getIssuePLBridge(issue?: Risk | Opportunity | null): string {
+  if (!issue) return "Revenue · Gross margin · COGS · SG&A · EBITDA — Directional only, not an earnings forecast. Requires calibration inputs.";
+  const category = String((issue as any).issue_category || "").toLowerCase();
+  const title = String((issue as any).risk_title || (issue as any).title || "").toLowerCase();
+  const section = (issue as any).display_section || "";
+
+  if (section === "opportunity" || "revenue_low" in issue) {
+    return "Revenue ↑ · Gross margin ↑ (volume leverage) · SG&A ↑ (sales cost) — Upside directional only. Requires segment confirmation.";
+  }
+  if (category.includes("freight") || category.includes("logistics") || title.includes("freight")) {
+    return "COGS ↑ (freight in) · SG&A ↑ (outbound freight) · Gross margin ↓ — Direct cost impact. Pass-through rate determines net P&L effect.";
+  }
+  if (category.includes("tariff") || category.includes("trade") || title.includes("tariff")) {
+    return "COGS ↓ potential relief · Gross margin ↑ if supplier landed costs update · Residual exposure remains until supplier/PO validation.";
+  }
+  if (category.includes("commodity") || category.includes("steel") || category.includes("copper") || title.includes("steel") || title.includes("copper")) {
+    return "COGS ↑ (raw material) · Gross margin ↓ · Revenue ↔ (pass-through lag) — Commodity cost pressure. Lag and hedging determine timing.";
+  }
+  if (category.includes("competitor") || category.includes("market_share") || title.includes("competitor")) {
+    return "Revenue ↓ (share shift) · Gross margin ↔ · SG&A ↑ (retention spend) — Competitive displacement. Volume loss drives operating deleverage.";
+  }
+  if (category.includes("demand") || category.includes("customer") || category.includes("revenue")) {
+    return "Revenue ↓ · Gross margin ↓ (deleverage) · EBITDA ↓ — Demand-side pressure. Fixed cost absorption worsens at lower volumes.";
+  }
+  if (category.includes("service") || category.includes("fill_rate") || category.includes("backorder")) {
+    return "Revenue ↓ (lost sales) · SG&A ↑ (expedite cost) · Gross margin ↓ — Service failure leakage. Expedite costs compound the revenue miss.";
+  }
+  if (section === "watchlist") {
+    return "P&L bridge not yet modeled — watchlist item. Upgrade to active risk to generate directional P&L estimate.";
+  }
+  return "Revenue · Gross margin · COGS · SG&A · EBITDA — Directional only. Specific P&L line depends on company calibration inputs.";
+}
+
 function formatPercentDecimal(value: unknown, digits = 1) {
   const n = Number(value);
 
@@ -2920,64 +3660,103 @@ function friendlyMissingInput(input: string) {
   return input;
 }
 
-function getMissingCalibrationText(risk: Risk) {
-  const missing = risk.methodology?.missing_inputs || [];
+// ---------------------------------------------------------------------------
+// Action ROI derivation — populates workflow fields from linked risk/opportunity
+// ---------------------------------------------------------------------------
 
-  if (!Array.isArray(missing) || missing.length === 0) {
-    return "Required company calibration inputs are missing.";
+type DerivedActionFields = {
+  owner: string | null;
+  deadline: string | null;
+  effortLevel: string;
+  successCondition: string;
+  nextStep: string;
+  decisionTrigger: string;
+};
+
+function deriveActionRoiFields(
+  action: ActionItem,
+  linkedRisk: Risk | null,
+  linkedOpp: Opportunity | null
+): DerivedActionFields {
+  if (!linkedRisk && !linkedOpp) {
+    return {
+      owner: null,
+      deadline: null,
+      effortLevel: "Medium",
+      successCondition: "Action completed and outcome documented.",
+      nextStep: "Review with relevant owner and confirm next steps.",
+      decisionTrigger: "Escalate if no owner assigned within one review cycle.",
+    };
   }
 
-  const clean = missing.map(friendlyMissingInput);
-  const unique = [...new Set(clean)];
+  const category = String((linkedRisk as any)?.issue_category || "").toLowerCase();
+  const title = String(linkedRisk?.risk_title || linkedOpp?.title || "").toLowerCase();
 
-  if (unique.length === 1) {
-    return `Missing calibration: ${unique[0]}.`;
+  // Freight-specific action
+  if (category.includes("freight") || title.includes("freight") || title.includes("container")) {
+    return {
+      owner: action.owner || "Head of Logistics",
+      deadline: action.deadline || "2026-06-22",
+      effortLevel: "Medium",
+      successCondition: "Top inbound lanes classified by contract coverage, surcharge exposure, and mitigation option.",
+      nextStep: "Identify top inbound lanes with spot or surcharge exposure and compare current contract coverage.",
+      decisionTrigger: "spot exposure exceeds 20% or new surcharges hit top-volume lanes",
+    };
   }
 
-  return `Missing calibration: ${unique.slice(0, 3).join(", ")}${
-    unique.length > 3 ? ` +${unique.length - 3} more` : ""
-  }.`;
+  // Tariff / trade policy
+  if (category.includes("tariff") || category.includes("trade") || title.includes("tariff")) {
+    return {
+      owner: action.owner || "Head of Procurement",
+      deadline: action.deadline || null,
+      effortLevel: "Medium",
+      successCondition: "Supplier country-of-origin confirmed, import-category exposure sized, landed-cost assumptions updated.",
+      nextStep: "Pull supplier country-of-origin list and classify steel, aluminum, and copper import exposure by category.",
+      decisionTrigger: "exposed imports exceed $10M or suppliers have not confirmed updated landed costs",
+    };
+  }
+
+  // Commodity / metals
+  if (category.includes("commodity") || category.includes("steel") || category.includes("copper") ||
+      title.includes("steel") || title.includes("copper") || title.includes("aluminum")) {
+    return {
+      owner: action.owner || "Head of Procurement",
+      deadline: action.deadline || null,
+      effortLevel: "Medium",
+      successCondition: "Supplier-level landed cost and tariff impact validated by SKU.",
+      nextStep: "Review commodity spend by supplier and confirm country-of-origin for top-volume items.",
+      decisionTrigger: "tariff exposure on metals exceeds $5M net after pass-through",
+    };
+  }
+
+  // Opportunity / demand
+  if (linkedOpp || category.includes("demand") || category.includes("manufacturing")) {
+    return {
+      owner: action.owner || "Head of Sales",
+      deadline: action.deadline || null,
+      effortLevel: "Low",
+      successCondition: "CRM pipeline confirms quote growth or order strength in manufacturing accounts.",
+      nextStep: "Pull CRM data for manufacturing account segment — quote volume trend and win rate last 90 days.",
+      decisionTrigger: "CRM confirms quote growth >10% or order strength in target accounts",
+    };
+  }
+
+  // Generic fallback
+  const hasExposure = (linkedRisk?.impact_low ?? 0) > 0;
+  return {
+    owner: action.owner || linkedRisk?.owner || null,
+    deadline: action.deadline || null,
+    effortLevel: "Medium",
+    successCondition: hasExposure
+      ? "Exposure validated and mitigation option identified."
+      : "Issue reviewed and owner confirmed.",
+    nextStep: linkedRisk?.action_required
+      ? String(linkedRisk.action_required).slice(0, 120)
+      : "Review with relevant owner and confirm next steps.",
+    decisionTrigger: getDecisionTrigger(linkedRisk ?? linkedOpp as any),
+  };
 }
 
-function getWatchlistBlockerText(risk: Risk) {
-  const status = getIssueModelStatus(risk.methodology);
-
-  if (status.status === "needs_calibration") {
-    return getMissingCalibrationText(risk);
-  }
-
-  if (status.status === "scenario_fallback") {
-    const rejectedValues = formatRejectedShockValues(risk.methodology);
-
-    if (rejectedValues) {
-      return `Rejected ${rejectedValues} as not clearly new or incremental.`;
-    }
-
-    return "No new explicit percentage found.";
-  }
-
-  if (risk.issue_direction) {
-    return `Direction: ${cleanLabel(risk.issue_direction)}.`;
-  }
-
-  return "Direction or evidence strength is uncertain.";
-}
-
-function getWatchlistUpgradeText(risk: Risk) {
-  const status = getIssueModelStatus(risk.methodology);
-
-  if (status.status === "needs_calibration") {
-    return `${getMissingCalibrationText(
-      risk
-    )} Add the missing calibration fields, then regenerate risks.`;
-  }
-
-  if (status.status === "scenario_fallback") {
-    return "A current article with a clearly new percentage, rate, cost, demand, or supply movement would upgrade this from scenario sensitivity to evidence-backed exposure.";
-  }
-
-  return "A current adverse operating signal with direct company exposure would upgrade this from watchlist to modeled risk.";
-}
 function formatMoney(value: number | null | undefined) {
   const number = Number(value || 0);
 
@@ -3155,117 +3934,6 @@ function formatIssueDirection(value: string | null | undefined) {
   return cleanLabel(text);
 }
 
-function compactText(value: unknown) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function ensureSentence(value: unknown) {
-  const text = compactText(value);
-  if (!text) return "";
-  return /[.!?]$/.test(text) ? text : `${text}.`;
-}
-
-function textFingerprint(value: unknown) {
-  return compactText(value)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
-}
-
-function isDuplicateMeaning(candidate: string, existing: string[]) {
-  const candidateKey = textFingerprint(candidate);
-
-  if (!candidateKey) return true;
-
-  return existing.some((item) => {
-    const itemKey = textFingerprint(item);
-
-    if (!itemKey) return false;
-    if (candidateKey === itemKey) return true;
-
-    const shorter = candidateKey.length < itemKey.length ? candidateKey : itemKey;
-    const longer = candidateKey.length < itemKey.length ? itemKey : candidateKey;
-
-    return shorter.length > 80 && longer.includes(shorter);
-  });
-}
-
-function joinDistinctSentences(values: unknown[], max = 3) {
-  const chosen: string[] = [];
-
-  for (const value of values) {
-    const text = ensureSentence(value);
-
-    if (!text) continue;
-    if (isDuplicateMeaning(text, chosen)) continue;
-
-    chosen.push(text);
-
-    if (chosen.length >= max) break;
-  }
-
-  return chosen.join(" ");
-}
-
-function getOperatingChangePlanningSentence(risk: Risk) {
-  const direction = String(risk.issue_direction || "").toLowerCase();
-
-  if (direction.includes("favorable") && direction.includes("residual")) {
-    return "GroundSense separates the remaining exposure from the favorable change so leaders can update sourcing, pricing, and planning assumptions without treating the change itself as a new downside event.";
-  }
-
-  if (direction.includes("favorable")) {
-    return "GroundSense keeps this outside downside risk totals because the evidence points to relief or upside, while still preserving it as an executive planning item.";
-  }
-
-  if (direction.includes("mixed") || direction.includes("uncertain")) {
-    return "GroundSense keeps this as an operating change because the evidence changes planning assumptions, but the financial direction is not clean enough to classify as pure downside or upside.";
-  }
-
-  return "GroundSense treats this as a planning assumption change rather than a downside risk, so the action is to update operating plans instead of launching mitigation as if a new loss event occurred.";
-}
-
-function getOperatingChangeExplanation(risk: Risk) {
-  // Prefer exposure_interpretation as sentence 1 (prior→new rate + residual exposure),
-  // then business_impact as sentence 2 (relief + procurement action required).
-  // Fall back to other fields if those are absent.
-  const s1 = risk.exposure_interpretation || risk.executive_summary || risk.what_happened;
-  const s2 = risk.business_impact || risk.risk_interaction || getOperatingChangePlanningSentence(risk);
-
-  return joinDistinctSentences([s1, s2], 2);
-}
-
-function formatWatchlistBlockerSentence(risk: Risk) {
-  const blocker = compactText(getWatchlistBlockerText(risk)).replace(/\.$/, "");
-
-  if (!blocker) {
-    return "Blocker: Direction, calibration, or evidence strength is still unresolved.";
-  }
-
-  if (blocker.toLowerCase().startsWith("direction:")) {
-    return `GroundSense is holding this in Watchlist because ${blocker
-      .replace(/^direction:\s*/i, "")
-      .toLowerCase()} has not been resolved into a clear modeled downside case.`;
-  }
-
-  return `Blocker: ${blocker}.`;
-}
-
-function getWatchlistExplanation(risk: Risk) {
-  return joinDistinctSentences(
-    [
-      risk.executive_summary,
-      risk.what_happened,
-      risk.business_impact,
-      risk.risk_interaction,
-      risk.exposure_interpretation,
-      formatWatchlistBlockerSentence(risk),
-    ],
-    4
-  );
-}
 function cleanLabel(value: string | null | undefined) {
   return String(value || "")
     .replace(/_/g, " ")
@@ -3418,10 +4086,11 @@ function explainRiskPriority(risk: Risk): NumberExplanation {
   // Build labeled priority drivers
   const drivers: ExplanationInput[] = [
     { label: "Financial magnitude", value: exposure > 0 ? formatMoney(exposure) + " high-end exposure" : "Not calibrated" },
-    { label: "Likelihood estimate", value: `${risk.probability || 0}%` },
-    { label: "Evidence confidence", value: `${risk.confidence || 0}%` },
+    { label: "Scenario confidence", value: `${clampPercent(risk.probability)}%` },
+    { label: "Evidence confidence", value: `${clampPercent(risk.confidence)}% (${formatConfidenceLabel(risk.confidence)})` },
     { label: "Evidence signals", value: String(risk.supporting_event_count || 0) },
     { label: "Model basis", value: status.label },
+    { label: "Estimate quality", value: formatEstimateQuality(risk.methodology) },
     { label: "Severity rating", value: risk.severity || "Not set" },
   ];
 
@@ -3451,7 +4120,7 @@ function getRiskExposureDisplay(risk: Risk) {
   const high = Number(risk.impact_high || 0);
 
   if (low === high) {
-    return formatMoney(high);
+    return `${formatMoney(high)} point estimate`;
   }
 
   return `${formatMoney(low)}–${formatMoney(high)}`;
@@ -3603,8 +4272,8 @@ function explainOpportunityPriority(opportunity: Opportunity): NumberExplanation
       "opportunity priority combines revenue range, probability, confidence, evidence count, and source quality",
     inputs: [
       `Stored priority_score: ${opportunity.priority_score || 0}/100`,
-      `Probability: ${opportunity.probability || 0}%`,
-      `Confidence: ${opportunity.confidence || 0}%`,
+      `Probability: ${clampPercent(opportunity.probability)}%`,
+      `Confidence: ${clampPercent(opportunity.confidence)}% (${formatConfidenceLabel(opportunity.confidence)})`,
       `Supporting events: ${opportunity.supporting_event_count || 0}`,
     ],
     source:
@@ -3995,16 +4664,31 @@ function TrustAuditPanel({
         )}
 
         <div className="trust-row">
-          <span className="trust-row-label">Confidence</span>
+          <span className="trust-row-label">Evidence signals</span>
           <div className="trust-row-value">
             <span>
-              {signalCount} supporting signal{signalCount !== 1 ? "s" : ""}
+              {signalCount} signal{signalCount !== 1 ? "s" : ""} paired
             </span>
             {avgQuality > 0 && (
               <span className="trust-row-note">
                 Avg source quality {avgQuality}/100
               </span>
             )}
+          </div>
+        </div>
+
+        <div className="trust-row">
+          <span className="trust-row-label">Confidence breakdown</span>
+          <div className="confidence-decomp">
+            {getConfidenceDecomposition(methodology, evidence).map((item) => (
+              <div key={item.label} className="confidence-decomp-row">
+                <span className="confidence-decomp-label">{item.label}</span>
+                <span className="confidence-decomp-right">
+                  <span className={`confidence-level confidence-level-${item.level.toLowerCase().replace(/ /g, "-")}`}>{item.level}</span>
+                  <span className="confidence-decomp-value">{item.value}</span>
+                </span>
+              </div>
+            ))}
           </div>
         </div>
 

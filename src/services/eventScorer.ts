@@ -34,7 +34,7 @@ type CleanEvent = RawEvent & {
 };
 
 const MAX_EVENTS_TO_LOAD = 5000;
-const SCORE_BATCH_SIZE = 100;
+const SCORE_BATCH_SIZE = 20;
 
 const MIN_FINAL_RELEVANCE_SCORE = 35;
 const MIN_SOURCE_QUALITY = 45;
@@ -273,15 +273,16 @@ async function markRejectedEvents(rejectedEvents: RawEvent[]) {
   if (rejectedEvents.length === 0) return;
 
   const ids = rejectedEvents.map((event) => event.id).filter(Boolean);
-
   if (ids.length === 0) return;
 
-  await supabase
-    .from("raw_events")
-    .update({
-      rejected_reason: "Rejected by scorer source-quality/relevance gate",
-    })
-    .in("id", ids);
+  // Supabase REST URL limit: chunk .in() to avoid 400 Bad Request
+  const chunks = chunkArray(ids, 50);
+  for (const chunk of chunks) {
+    await supabase
+      .from("raw_events")
+      .update({ rejected_reason: "Rejected by scorer source-quality/relevance gate" })
+      .in("id", chunk);
+  }
 }
 
 async function updateCorrectedQuality(cleanEvents: CleanEvent[]) {
@@ -377,15 +378,11 @@ export async function scoreEventsForCompany(companyId: string) {
   await updateCorrectedQuality(candidateEvents);
 
   if (candidateEvents.length > 0) {
-    await supabase
-      .from("raw_events")
-      .update({
-        rejected_reason: null,
-      })
-      .in(
-        "id",
-        candidateEvents.map((event) => event.id)
-      );
+    const candidateIds = candidateEvents.map((event) => event.id);
+    const clearChunks = chunkArray(candidateIds, 50);
+    for (const chunk of clearChunks) {
+      await supabase.from("raw_events").update({ rejected_reason: null }).in("id", chunk);
+    }
   }
 
   if (candidateEvents.length === 0) {

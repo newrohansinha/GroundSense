@@ -560,13 +560,14 @@ export function stopFreshIntelligenceBatch() {
   console.log("Fresh intelligence batch stop requested.");
 }
 
-export async function fetchFreshIntelligenceForCompany(companyId: string) {
+export async function fetchFreshIntelligenceForCompany(companyId: string, options?: { silent?: boolean }) {
+  const silent = options?.silent ?? false;
   stopRequested = false;
 
   const queries = await loadTrackingQueries(companyId);
 
   if (queries.length === 0) {
-    alert("No active tracking queries found. Add rows to news_tracking_queries first.");
+    if (!silent) alert("No active tracking queries found. Add rows to news_tracking_queries first.");
     return;
   }
 
@@ -739,7 +740,7 @@ Failed calls: ${stats.failedCalls}
 Rate limited: ${stats.rateLimited}`;
 
   console.log(message);
-  alert(message);
+  if (!silent) alert(message);
 }
 
 export async function fetchArticleContentForCompany(companyId: string) {
