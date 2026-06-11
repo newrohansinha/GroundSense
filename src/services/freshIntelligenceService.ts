@@ -78,47 +78,6 @@ const NORMAL_COOLDOWN_MS = 2500;
 const QUERY_COOLDOWN_MS = 3500;
 const RATE_LIMIT_COOLDOWN_MS = 60000;
 
-const HIGH_QUALITY_DOMAINS = new Set([
-  "reuters.com",
-  "apnews.com",
-  "bloomberg.com",
-  "wsj.com",
-  "cnbc.com",
-  "marketwatch.com",
-  "nasdaq.com",
-  "finance.yahoo.com",
-  "investing.com",
-  "morningstar.com",
-  "prnewswire.com",
-  "businesswire.com",
-  "globenewswire.com",
-  "supplychaindive.com",
-  "constructiondive.com",
-  "manufacturingdive.com",
-  "industryweek.com",
-  "freightwaves.com",
-  "spglobal.com",
-  "federalregister.gov",
-  "whitehouse.gov",
-  "census.gov",
-  "bls.gov",
-  "bea.gov",
-  "ismworld.org",
-  "kitco.com",
-]);
-
-const LOW_QUALITY_DOMAINS = new Set([
-  "dev.to",
-  "mirror.co.uk",
-  "jalopnik.com",
-  "soompi.com",
-  "deadline.com",
-  "esquire.com",
-  "thetakeout.com",
-  "wccftech.com",
-  "androidheadlines.com",
-]);
-
 const GLOBAL_BLOCKED_TERMS = [
   "market cap rank",
 "relative strength rating",
@@ -215,29 +174,6 @@ function freshnessBucket(days: number | null) {
   return "stale";
 }
 
-function sourceQuality(domain: string) {
-  if (HIGH_QUALITY_DOMAINS.has(domain)) return 95;
-
-  if (
-    [...HIGH_QUALITY_DOMAINS].some(
-      (known) => domain === known || domain.endsWith(`.${known}`)
-    )
-  ) {
-    return 90;
-  }
-
-  if (LOW_QUALITY_DOMAINS.has(domain)) return 35;
-
-  if (domain.endsWith(".gov")) return 94;
-  if (domain.endsWith(".edu")) return 82;
-  if (domain.includes("business")) return 75;
-  if (domain.includes("finance")) return 75;
-  if (domain.includes("industry")) return 72;
-  if (domain.includes("news")) return 62;
-
-  return 55;
-}
-
 function sourceTier(score: number) {
   if (score >= 90) return "tier_1";
   if (score >= 72) return "tier_2";
@@ -252,10 +188,6 @@ function termMatches(text: string, terms: string[]) {
 
     return text.includes(normalized);
   });
-}
-
-function unique(values: string[]) {
-  return [...new Set(values.filter(Boolean))];
 }
 
 function calculateArticleQuality(input: {
@@ -458,7 +390,7 @@ function normalizeArticle(
   const publishedDate = parseDate(article.published);
   const days = ageDays(publishedDate);
 
-  if (days === null) return null;
+  if (!publishedDate || days === null) return null;
   if (days > FRESH_DAYS) return null;
 
   const source = scoreNewsSource({
