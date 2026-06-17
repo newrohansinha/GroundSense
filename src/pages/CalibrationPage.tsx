@@ -333,8 +333,8 @@ function CalibrationPage() {
             </p>
           </div>
 
-          <Link to="/dashboard">
-            <button className="calibration-secondary">Back to dashboard</button>
+          <Link to="/calibration">
+            <button className="calibration-secondary">← Back to Calibration Center</button>
           </Link>
         </header>
 

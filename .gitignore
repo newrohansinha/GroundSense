@@ -13,6 +13,26 @@ node_modules
 dist
 dist-ssr
 *.local
+coverage
+.vite/
+tmp/
+
+# Playwright / browser-test artifacts
+.playwright-mcp/
+test-results/
+playwright-report/
+playwright/.cache/
+**/screenshots/
+*.webm
+trace.zip
+
+# Local screenshot/scratch captures (not product assets)
+/dash-*.png
+/dashboard-*.png
+/smoke-*.png
+
+# Supabase CLI scratch
+supabase/.temp/
 
 # Editor directories and files
 .vscode/*

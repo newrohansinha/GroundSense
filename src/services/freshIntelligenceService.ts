@@ -71,7 +71,7 @@ let stopRequested = false;
 
 const TARGET_FRESH_ARTICLES = 500;
 const PAGE_SIZE = 50;
-const PAGES_PER_QUERY = 4;
+const PAGES_PER_QUERY = 1;
 const FRESH_DAYS = 7;
 
 const NORMAL_COOLDOWN_MS = 2500;
@@ -190,6 +190,23 @@ function termMatches(text: string, terms: string[]) {
   });
 }
 
+// Words from a query that carry relevance (e.g. "China Steel tariffs" →
+// ["china","steel","tariffs"]). Used to score relevance when a tracking query
+// has no explicit required/signal terms (auto-seeded queries), so articles
+// aren't all rejected for "low relevance".
+const QUERY_TERM_STOPWORDS = new Set([
+  "the", "and", "for", "with", "into", "from", "you", "your",
+]);
+function deriveQueryTerms(queryText: string): string[] {
+  return String(queryText || "")
+    .toLowerCase()
+    .replace(/["']/g, " ")
+    .replace(/[^a-z0-9 ]/g, " ")
+    .split(/\s+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length >= 3 && !QUERY_TERM_STOPWORDS.has(w));
+}
+
 function calculateArticleQuality(input: {
   article: CurrentsArticle;
   query: TrackingQuery;
@@ -257,11 +274,22 @@ function calculateArticleQuality(input: {
     };
   }
 
+  // Auto-seeded queries have no required/signal terms; derive relevance from the
+  // query's own words so genuinely relevant articles aren't all rejected.
+  const noConfiguredTerms = requiredTerms.length === 0 && signalTerms.length === 0;
+  const derivedTerms = noConfiguredTerms ? deriveQueryTerms(input.query.query_text) : [];
+  const matchedDerived = noConfiguredTerms ? termMatches(text, derivedTerms) : [];
+
   let score = 0;
 
   if (matchedRequired.length > 0) score += 45;
 
   score += Math.min(35, matchedSignals.length * 18);
+
+  // Query-word relevance (only when no explicit terms were configured).
+  if (noConfiguredTerms && matchedDerived.length > 0) {
+    score += 40 + Math.min(40, matchedDerived.length * 18);
+  }
 
   if (input.source.score >= 90) score += 18;
   else if (input.source.score >= 80) score += 12;
@@ -296,7 +324,7 @@ return {
   accepted: true,
   score: finalScore,
   matchedRequired,
-  matchedSignals,
+  matchedSignals: noConfiguredTerms ? matchedDerived : matchedSignals,
   reason: `Accepted. Required: ${matchedRequired.join(
     ", "
   )}. Signals: ${matchedSignals.join(", ")}. Source: ${

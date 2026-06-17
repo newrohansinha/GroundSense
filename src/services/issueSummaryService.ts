@@ -113,7 +113,7 @@ const FREIGHT_SAFE_EXEC =
   "Freight markets are tightening due to geopolitical disruption, congestion, carrier surcharges, and peak-season demand. The $756K–$3.0M range is scenario-modeled because no clean current incremental rate was found in evidence.";
 
 const FREIGHT_SAFE_FORECAST =
-  "Scenario-modeled freight downside based on inferred spot-exposed freight assumptions.";
+  "Source-backed logistics price pressure estimate; lane-specific freight-rate validation pending.";
 
 const OPPORTUNITY_CANDIDATE_SAFE =
   "Broad industrial and materials signals may indicate demand support in manufacturing accounts, but current evidence is not account-specific. Treat the $2.0M–$6.0M range as candidate upside until CRM, quote volume, or customer order data validates demand.";

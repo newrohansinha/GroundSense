@@ -543,3 +543,26 @@ entrypoint = "./functions/generate-dynamic-risks/index.ts"
 enabled = true
 verify_jwt = false
 entrypoint = "./functions/fetch-article-content/index.ts"
+
+# Manual "Run Intelligence Update" entrypoint. verify_jwt = false because the
+# function validates the user's session JWT itself (clean 401) and enforces
+# company membership + demo read-only before doing any work.
+[functions.start-intelligence-run]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/start-intelligence-run/index.ts"
+
+# Reachability / readiness probe. Public so the dashboard can distinguish
+# "not deployed / CORS / network" from "reachable but secret/DB missing".
+[functions.intelligence-healthcheck]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/intelligence-healthcheck/index.ts"
+
+# Resumable staged worker (Option B). INTERNAL only — authenticates via the
+# service-role bearer (self-invoke) or the Vault scheduler secret (cron). The
+# browser can never call it. verify_jwt=false because it does its own check.
+[functions.continue-intelligence-run]
+enabled = true
+verify_jwt = false
+entrypoint = "./functions/continue-intelligence-run/index.ts"

@@ -52,16 +52,22 @@ function inferDriver(
 // We only quarantine if evidence is completely unrelated AND driver is unknown.
 // Scenario-modeled risks with a valid driver always publish with appropriate labeling.
 
-export function evaluateRiskGate(risk: {
-  id: string;
-  risk_title?: string | null;
-  risk_type?: string | null;
-  issue_category?: string | null;
-  display_section?: string | null;
-  confidence?: number | null;
-  evidence_items?: { title?: string; source?: string; [key: string]: unknown }[] | null;
-  methodology?: { calibration_status?: string; formula_status?: string } | null;
-}): IssueGateResult {
+export function evaluateRiskGate(
+  risk: {
+    id: string;
+    risk_title?: string | null;
+    risk_type?: string | null;
+    issue_category?: string | null;
+    display_section?: string | null;
+    confidence?: number | null;
+    evidence_items?: { title?: string; source?: string; [key: string]: unknown }[] | null;
+    methodology?: { calibration_status?: string; formula_status?: string } | null;
+  },
+  // Source-fusion context (Part 10): a verified external shock for this driver can only
+  // ADD positive signal to a publishable risk — it never flips quarantine/review decisions.
+  opts?: { hasVerifiedShock?: boolean }
+): IssueGateResult {
+  const hasVerifiedShock = opts?.hasVerifiedShock ?? false;
   const evidenceItems = risk.evidence_items || [];
   const driver = inferDriver(risk.risk_title, risk.risk_type, risk.issue_category);
   const claims = classifyEvidenceItems(evidenceItems, driver);
@@ -131,15 +137,19 @@ export function evaluateRiskGate(risk: {
     };
   }
 
-  const qualityScore = Math.round(
-    alignment.alignmentScore * 0.4 +
-    confidence * 0.3 +
-    (evidenceItems.length > 0 ? 20 : 0) +
-    (driver !== "irrelevant" ? 10 : 0)
+  const qualityScore = Math.min(
+    100,
+    Math.round(
+      alignment.alignmentScore * 0.4 +
+      confidence * 0.3 +
+      (evidenceItems.length > 0 ? 20 : 0) +
+      (driver !== "irrelevant" ? 10 : 0)
+    ) + (hasVerifiedShock ? 10 : 0)
   );
 
   const forecastEligible =
-    alignment.alignmentScore >= 30 && confidence >= 50 && driver !== "irrelevant";
+    (alignment.alignmentScore >= 30 && confidence >= 50 && driver !== "irrelevant") ||
+    (hasVerifiedShock && driver !== "irrelevant" && confidence >= 40);
 
   return {
     decision: "publish",
@@ -147,7 +157,7 @@ export function evaluateRiskGate(risk: {
     evidenceAlignmentScore: alignment.alignmentScore,
     companyRelevanceScore: driver !== "irrelevant" ? Math.max(40, alignment.alignmentScore) : 20,
     forecastEligible,
-    reasons: [],
+    reasons: hasVerifiedShock ? ["Backed by a verified external structured-metric shock for this driver."] : [],
     requiredToPromote: [],
     claims,
     alignedCount: alignment.alignedCount,
@@ -259,10 +269,12 @@ export function evaluateOpportunityGate(opportunity: {
 
 export function runQualityGateOnAll(
   risks: Parameters<typeof evaluateRiskGate>[0][],
-  opportunities: Parameters<typeof evaluateOpportunityGate>[0][]
+  opportunities: Parameters<typeof evaluateOpportunityGate>[0][],
+  // Issue ids that have a verified external shock (from source fusion). Additive only.
+  verifiedShockIssueIds?: Set<string>
 ): Map<string, IssueGateResult> {
   const results = new Map<string, IssueGateResult>();
-  for (const r of risks) results.set(r.id, evaluateRiskGate(r));
+  for (const r of risks) results.set(r.id, evaluateRiskGate(r, { hasVerifiedShock: verifiedShockIssueIds?.has(r.id) }));
   for (const o of opportunities) results.set(o.id, evaluateOpportunityGate(o));
   return results;
 }

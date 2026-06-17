@@ -129,22 +129,22 @@ const FREIGHT_DECISION_TRIGGER =
   "Escalate if spot-exposed freight spend exceeds 20% of total freight spend, new surcharges are announced on top-volume inbound lanes, or spot rates on key lanes rise more than 5% month-over-month.";
 
 const TARIFF_OP_CHANGE_SUMMARY =
-  "Tariff rates decreased from 25% to 15%, creating potential procurement relief while leaving residual exposure on steel, aluminum, and copper inputs. Procurement should validate supplier country-of-origin, import-category exposure, and landed-cost assumptions before treating modeled relief as realized.";
+  "The verified tariff metric (25% → 15%) applies to steel-linked import exposure, creating potential procurement relief. Aluminum and copper require separate tariff metrics or supplier validation before being independently quantified. Procurement should validate supplier country-of-origin, import-category exposure, and landed-cost assumptions before treating relief as realized.";
 
 const STEEL_TARIFF_RISK_SUMMARY =
-  "Tariff rates on steel, aluminum, and copper inputs decreased from 25% to 15%, creating potential landed-cost relief. Residual exposure remains — the realized saving depends on supplier country-of-origin, open PO coverage, and whether suppliers have updated landed-cost assumptions. GroundSense models the net exposure as a scenario estimate until procurement validates.";
+  "The verified tariff metric (25% → 15%) applies to steel-linked import exposure, creating potential landed-cost relief. Aluminum and copper require separate tariff metrics or supplier validation before being independently quantified. The realized saving depends on supplier country-of-origin, open PO coverage, and whether suppliers have updated landed-cost assumptions.";
 
 const STEEL_TARIFF_WHAT_CHANGED =
-  "Tariff rates on steel, aluminum, and copper inputs decreased from 25% to 15%. Procurement should validate which suppliers and SKUs are affected, whether landed-cost assumptions have been updated, and what net exposure remains after pass-through.";
+  "The verified tariff metric (25% → 15%) applies to steel-linked import exposure. Aluminum and copper require separate tariff metrics or supplier validation before being independently quantified. Procurement should validate which suppliers and SKUs are affected and whether landed-cost assumptions have been updated.";
 
 const STEEL_TARIFF_WHY_NOW =
   "Tariff rates changed recently — procurement windows, open POs, and supplier contracts may still reflect the prior rate. Validating now prevents locked-in exposure from appearing as margin drag in future quarters.";
 
 const STEEL_TARIFF_BUSINESS_IMPACT =
-  "Potential landed-cost relief on steel, aluminum, and copper inputs if the rate decrease (25%→15%) flows through supplier pricing. Net P&L effect depends on whether suppliers update landed costs, what portion of spend is import-exposed, and open PO exposure at time of validation. Benefit is scenario-modeled — not confirmed until procurement validates.";
+  "Potential landed-cost relief on steel-linked import exposure if the rate decrease (25% → 15%) flows through supplier pricing. Aluminum and copper require separate tariff metrics or supplier validation before being independently quantified. Net P&L effect depends on whether suppliers update landed costs, the import-exposed share of spend, and open PO exposure. Benefit is source-backed but not realized until procurement validates supplier landed costs, open POs, and country-of-origin exposure.";
 
 const TARIFF_DECISION_TRIGGER =
-  "Validate savings if exposed steel/aluminum/copper imports exceed $10M or suppliers have not updated landed-cost assumptions.";
+  "Validate savings if steel-linked imports exceed $10M or suppliers have not updated landed-cost assumptions.";
 
 const MANUFACTURING_OPP_TITLE = "Manufacturing Demand Opportunity Candidate";
 
@@ -293,7 +293,7 @@ export function getWatchlistUpgradeTrigger(_issue: IssueLike): string {
 
 export function getForecastSummary(issue: IssueLike): string {
   if (isFreightIssue(issue)) {
-    return "Scenario-modeled freight downside based on inferred spot-exposed freight assumptions.";
+    return "Source-backed logistics price pressure estimate; lane-specific freight-rate validation pending.";
   }
   if (isTariffIssue(issue)) {
     return "Tariff rate change requires procurement validation before realized savings are confirmed.";
@@ -373,7 +373,7 @@ export function getMemoLine(context: {
       prefix: "2. VALIDATE — Tariff",
       className: "memo-validate",
       text: hasTariffInPublished
-        ? "Tariff rates decreased from 25% to 15%, creating potential relief on steel, aluminum, and copper inputs. Residual exposure remains — procurement should validate supplier country-of-origin, open PO coverage, and updated landed-cost assumptions."
+        ? "The verified tariff metric (25% → 15%) applies to steel-linked import exposure, creating potential relief. Aluminum and copper require separate tariff metrics before being independently quantified — procurement should validate supplier country-of-origin, open PO coverage, and updated landed-cost assumptions."
         : context.topChange
         ? `${String(context.topChange.risk_title || "")} — validate operating impact with procurement.`
         : "No items pending validation.",

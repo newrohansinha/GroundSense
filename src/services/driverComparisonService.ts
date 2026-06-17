@@ -327,7 +327,7 @@ function buildRecommendedAction(
     supplier: "Identify single-source dependencies and supplier concentration risk.",
   };
   if (isFromOperatingChange && driverKey === "tariff") {
-    return "Validate savings if exposed steel/aluminum/copper imports exceed $10M or suppliers have not updated landed-cost assumptions.";
+    return "Validate steel-linked supplier landed-cost updates and country-of-origin; flag aluminum/copper separately only if additional tariff metrics or supplier evidence are available.";
   }
   return actionMap[driverKey] || "Monitor for changes.";
 }

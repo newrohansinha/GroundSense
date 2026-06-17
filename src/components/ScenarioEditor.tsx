@@ -36,6 +36,8 @@ type ScenarioEditorProps = {
     pass_through_coverage_pct?: number | null;
     average_repricing_lag_days?: number | null;
   } | null;
+  // Calibration keys that came from imported/derived company data (vs inferred base).
+  calibratedKeys?: string[];
 };
 
 function fmt(n: number): string {
@@ -106,9 +108,10 @@ function NumInput({
   );
 }
 
-export default function ScenarioEditor({ mode: initialMode = "freight", calibration }: ScenarioEditorProps) {
+export default function ScenarioEditor({ mode: initialMode = "freight", calibration, calibratedKeys = [] }: ScenarioEditorProps) {
   const [mode, setMode] = useState<ScenarioMode>(initialMode);
   const [isDirty, setIsDirty] = useState(false);
+  const isCalibrated = (key: string) => calibratedKeys.includes(key);
 
   const defaultFreight: FreightInputs = {
     annualFreightSpend: Number(calibration?.freight_spend ?? 90_000_000),
@@ -149,17 +152,17 @@ export default function ScenarioEditor({ mode: initialMode = "freight", calibrat
   const cr = calcCommodity(commodity);
 
   function freightSource(key: keyof typeof defaultFreight): "user" | "inferred" | "demo" {
-    if (key === "annualFreightSpend" && calibration?.freight_spend) return "inferred";
-    if (key === "spotExposurePct" && calibration?.freight_spot_rate_exposure_pct) return "inferred";
-    if (key === "contractCoveragePct" && calibration?.freight_contract_coverage_pct) return "inferred";
+    if (key === "annualFreightSpend" && calibration?.freight_spend) return isCalibrated("freight_spend") ? "user" : "inferred";
+    if (key === "spotExposurePct" && calibration?.freight_spot_rate_exposure_pct) return isCalibrated("freight_spot_rate_exposure_pct") ? "user" : "inferred";
+    if (key === "contractCoveragePct" && calibration?.freight_contract_coverage_pct) return isCalibrated("freight_contract_coverage_pct") ? "user" : "inferred";
     return "demo";
   }
 
   function commoditySource(key: keyof typeof defaultCommodity): "user" | "inferred" | "demo" {
-    if (key === "annualCommoditySpend" && calibration?.steel_spend) return "inferred";
-    if (key === "importExposurePct" && calibration?.steel_import_exposure_pct) return "inferred";
-    if (key === "passThroughPct" && calibration?.pass_through_coverage_pct) return "inferred";
-    if (key === "repricingLagDays" && calibration?.average_repricing_lag_days) return "inferred";
+    if (key === "annualCommoditySpend" && calibration?.steel_spend) return isCalibrated("steel_spend") ? "user" : "inferred";
+    if (key === "importExposurePct" && calibration?.steel_import_exposure_pct) return isCalibrated("steel_import_exposure_pct") ? "user" : "inferred";
+    if (key === "passThroughPct" && calibration?.pass_through_coverage_pct) return isCalibrated("pass_through_coverage_pct") ? "user" : "inferred";
+    if (key === "repricingLagDays" && calibration?.average_repricing_lag_days) return isCalibrated("average_repricing_lag_days") ? "user" : "inferred";
     return "demo";
   }
 

@@ -524,16 +524,12 @@ serve(async (req) => {
       grouped[key].push(assessment);
     }
 
-    const { count: deletedOpportunities } = await supabase
-      .from("opportunity_register")
-      .delete({ count: "exact" })
-      .eq("company_id", companyId);
-
-    await supabase
-      .from("risk_actions")
-      .delete()
-      .eq("company_id", companyId)
-      .eq("source_type", "opportunity");
+    // NON-DESTRUCTIVE MERGE. We never delete the company's opportunities/actions. Generated
+    // candidates upsert by (company_id, opportunity_key); candidates not regenerated this run
+    // (e.g. a blocked Construction Demand candidate) are preserved.
+    const runId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
+    const deletedOpportunities = 0;
 
     const drafts = Object.entries(grouped)
       .map(([key, items]) => {
@@ -654,6 +650,7 @@ serve(async (req) => {
           exposure_path: exposurePath,
           decision_required: meta.decision,
           expected_benefit: meta.benefit,
+          opportunity_key: `${key.replace(/-/g, "_")}_opportunity_candidate`,
           _priority: priorityScore,
         };
       })
@@ -679,12 +676,25 @@ serve(async (req) => {
       return {
         ...cleanDraft,
         opportunity_rank: index + 1,
+        last_seen_run_id: runId,
+        last_seen_at: nowIso,
       };
     });
 
+    // Dedupe by opportunity_key (clusters are already unique; belt-and-suspenders) so one
+    // upsert never writes the same (company_id, opportunity_key) twice.
+    const seenOppKeys = new Set<string>();
+    const dedupedOpps = opportunitiesToInsert.filter((o: any) => {
+      if (seenOppKeys.has(o.opportunity_key)) return false;
+      seenOppKeys.add(o.opportunity_key);
+      return true;
+    });
+
+    // NON-DESTRUCTIVE UPSERT by (company_id, opportunity_key). Matched candidates update in
+    // place (id + created_at preserved); candidates not in this run are preserved (not deleted).
     const { data: insertedOpportunities, error: insertError } = await supabase
       .from("opportunity_register")
-      .insert(opportunitiesToInsert)
+      .upsert(dedupedOpps, { onConflict: "company_id,opportunity_key" })
       .select();
 
     if (insertError) {
@@ -706,24 +716,22 @@ serve(async (req) => {
       await supabase.from("opportunity_snapshots").insert(snapshotRows);
     }
 
-    const actionRows = (insertedOpportunities || []).map((opportunity: any) => ({
-      company_id: companyId,
-      opportunity_id: opportunity.id,
-      title: opportunity.decision_required || opportunity.action_required,
-      owner: opportunity.owner,
-      deadline: addDays(Number(opportunity.due_days || 14)),
-      expected_benefit: opportunity.expected_benefit,
-      status: "open",
-      source_type: "opportunity",
-    }));
-
-    if (actionRows.length > 0) {
-      await supabase.from("risk_actions").insert(actionRows);
-    }
+    // NOTE: opportunity candidates do NOT get executive actions. Opportunities here are
+    // candidates pending validation (and the quality gate blocks weak ones), so creating an
+    // action would put a blocked candidate into Open Actions. Executive actions are created
+    // only for published risks / operating changes (generate-dynamic-risks). An approval
+    // workflow can add opportunity actions later for genuinely approved opportunities.
+    const oppActionsCreated = 0;
+    const oppActionsUpdated = 0;
 
     return jsonResponse({
-      inserted: insertedOpportunities?.length || 0,
-      deleted_old: deletedOpportunities || 0,
+      ok: true,
+      generator_version: "opportunity-generator-v2-nondestructive-merge",
+      merged: dedupedOpps.length,
+      opportunity_keys: dedupedOpps.map((o: any) => o.opportunity_key),
+      opp_actions_created: oppActionsCreated,
+      opp_actions_updated: oppActionsUpdated,
+      deleted_old: deletedOpportunities,
       opportunities: insertedOpportunities,
     });
   } catch (error) {

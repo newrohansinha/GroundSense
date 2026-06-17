@@ -1,9 +1,5 @@
-body {
-  margin: 0;
-  background: #0f172a;
-  color: #f8fafc;
-  font-family: Arial, Helvetica, sans-serif;
-}
+/* Legacy global classes (onboarding + base calibration form). Themed via tokens so they
+   are dark-mode safe like the rest of the app. theme.css owns html/body. */
 
 input,
 textarea,
@@ -12,12 +8,14 @@ button {
 }
 
 a {
-  color: inherit;
+  color: var(--accent);
 }
 
 .page {
   min-height: 100vh;
   padding: 40px;
+  background: var(--bg-app);
+  color: var(--text-primary);
 }
 
 .container {
@@ -26,11 +24,12 @@ a {
 }
 
 .card {
-  background: #111827;
-  border: 1px solid #334155;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
   border-radius: 16px;
   padding: 24px;
   margin-top: 20px;
+  color: var(--text-primary);
 }
 
 .input {
@@ -38,14 +37,14 @@ a {
   padding: 12px;
   margin-top: 8px;
   border-radius: 10px;
-  border: 1px solid #475569;
-  background: #020617;
-  color: white;
+  border: 1px solid var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-primary);
 }
 
 .button {
-  background: white;
-  color: black;
+  background: var(--accent);
+  color: var(--text-inverse);
   border: 0;
   border-radius: 10px;
   padding: 12px 18px;
@@ -61,4 +60,5 @@ a {
 .label {
   margin-top: 16px;
   font-weight: bold;
+  color: var(--text-secondary);
 }

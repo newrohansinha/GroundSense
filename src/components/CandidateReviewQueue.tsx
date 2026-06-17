@@ -27,7 +27,7 @@ function decisionClass(decision: GateDecision): string {
 }
 
 function ScoreBar({ label, value }: { label: string; value: number }) {
-  const color = value >= 60 ? "#22c55e" : value >= 35 ? "#f59e0b" : "#ef4444";
+  const color = value >= 60 ? "var(--success)" : value >= 35 ? "var(--warning)" : "var(--danger)";
   return (
     <div className="cq-score-row">
       <span className="cq-score-label">{label}</span>
@@ -143,8 +143,8 @@ export default function CandidateReviewQueue({ items }: { items: CandidateQueueI
     <section className="card cq-section-wrapper">
       <div className="card-header">
         <div>
-          <p className="eyebrow">Quality gate — blocked items</p>
-          <h2 className="section-title">Candidate Review Queue</h2>
+          <p className="eyebrow">Reviewed but excluded from executive estimates until evidence improves</p>
+          <h2 className="section-title">Items not promoted</h2>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {quarantined > 0 && (

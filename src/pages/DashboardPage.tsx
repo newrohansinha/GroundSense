@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
+import { isDemoMode } from "../services/companyService";
 import { matchEventsToConnections } from "../services/eventConnectionMatcher";
 import { fetchEventsForCompany } from "../services/eventFetcher";
 import { scoreEventsForCompany } from "../services/eventScorer";
@@ -17,17 +18,16 @@ import {
 } from "../services/freshIntelligenceService";
 import { buildConnectionsForCompany } from "../services/connectionService";
 import {
-  runIntelligenceUpdatePipeline,
   stopPipeline,
   resetPipeline,
   getInitialPipelineState,
   type PipelineState,
+  type PipelineStepStatus,
 } from "../services/intelligencePipelineService";
 
 import "./DashboardPage.css";
 import { attachConnectionsToRisks } from "../services/riskConnectionBackfill";
 import { computeDriverPriority } from "../services/driverComparisonService";
-import { computeOperatingModelCompleteness } from "../services/operatingModelService";
 import { getCalibrationForCompany, type CompanyCalibrationInput } from "../services/calibrationService";
 import {
   getRiskSummary,
@@ -53,9 +53,156 @@ import DriverPriorityMap from "../components/DriverPriorityMap";
 import ForecastAccuracyPanel from "../components/ForecastAccuracyPanel";
 import DecisionMemoryPanel from "../components/DecisionMemoryPanel";
 import ActionRoiPanel, { type ActionRoiItem } from "../components/ActionRoiPanel";
-import OperatingModelCompleteness from "../components/OperatingModelCompleteness";
 import CandidateReviewQueue, { type CandidateQueueItem } from "../components/CandidateReviewQueue";
 import { runQualityGateOnAll, type IssueGateResult } from "../services/issueQualityGateService";
+import CalibrationSummaryCard from "../components/calibration/CalibrationSummaryCard";
+import { useCalibrationWorkbench } from "../services/calibration/useCalibrationWorkbench";
+import {
+  freightCalibratedExposure,
+  steelCalibratedExposure,
+  type CalibratedExposure,
+} from "../services/calibration/calibratedExposureService";
+import {
+  buildIssueProvenance,
+  type IssueProvenance,
+  type VerifiedShockRow,
+} from "../services/sources/issueProvenanceService";
+import {
+  EXECUTIVE_POINT_ESTIMATE_MODE,
+  getExecutiveImpactEstimate,
+  formatExecutiveEstimate,
+  sumExecutiveEstimates,
+  type ExecutiveEstimate,
+} from "../services/executive/executiveImpactViewModel";
+import ExternalShockProvenance from "../components/sources/ExternalShockProvenance";
+import SourceCoverageCard from "../components/sources/SourceCoverageCard";
+import CompanyExposureGraph from "../components/exposure/CompanyExposureGraph";
+import { buildExposureGraphViewModel } from "../services/exposure/exposureGraphViewModel";
+import DashboardSidebar from "../components/shell/DashboardSidebar";
+import SchedulerStatusCard from "../components/scheduler/SchedulerStatusCard";
+import RunHistoryPanel from "../components/scheduler/RunHistoryPanel";
+import {
+  startIntelligenceRun,
+  getRunProgress,
+  getActiveRunForCompany,
+  expireStaleRuns,
+  checkEdgeHealth,
+  getRunEvents,
+  type RunProgressSnapshot,
+  type StartRunErr,
+  type EdgeHealth,
+  type RunEvent,
+} from "../services/schedulerService";
+import { seedCompanySignals } from "../services/companySignalSeeder";
+// Server-owned pipeline stages — mirrors _shared/intelligence-orchestrator.ts
+// STAGES. The dashboard renders progress from the DB run, not from any in-browser
+// pipeline execution.
+const SERVER_STAGES: { id: string; label: string }[] = [
+  { id: "fetch-fresh", label: "Fetching external intelligence" },
+  { id: "score-events", label: "Scoring relevance" },
+  { id: "detect-changes", label: "Detecting material change" },
+  { id: "build-connections", label: "Building company connections" },
+  { id: "generate-risks", label: "Generating risks" },
+  { id: "generate-opportunities", label: "Generating opportunities" },
+  { id: "quality-gate", label: "Running quality gate" },
+  { id: "generate-brief", label: "Rebuilding leadership brief" },
+  { id: "finalize", label: "Finalizing & consistency check" },
+];
+
+const TERMINAL_RUN_STATUSES = new Set([
+  "completed", "completed_with_warnings", "failed", "expired", "skipped",
+]);
+
+// Counters surfaced in the live progress panel (DB-sourced).
+const RUN_COUNTER_FIELDS: [keyof RunProgressSnapshot, string][] = [
+  ["queries_executed", "queries run"],
+  ["articles_fetched", "articles fetched"],
+  ["articles_inserted", "new articles"],
+  ["article_duplicates", "duplicates"],
+  ["articles_rejected", "rejected"],
+  ["verified_shocks_created", "verified shocks"],
+  ["candidates_generated", "candidates"],
+  ["candidates_published", "published"],
+  ["candidates_review", "review"],
+  ["candidates_quarantined", "quarantined"],
+  ["actions_created", "actions"],
+  ["briefs_created", "brief"],
+];
+
+// Maps a structured start error_code → an actionable fix shown in the UI.
+function suggestedFix(code: string): string {
+  switch (code) {
+    case "function_unreachable":
+    case "network_error":
+      return "The Edge Function isn't reachable — it's most likely not deployed. Deploy it (`supabase functions deploy start-intelligence-run` + `intelligence-healthcheck`) and confirm the app's Supabase URL matches the deployed project. Then click “Test Edge Function health”.";
+    case "missing_auth":
+      return "Your session is missing or expired. Sign out and sign back in, then retry.";
+    case "demo_read_only":
+      return "You're in the read-only demo workspace. Sign up or open your own workspace to run intelligence.";
+    case "forbidden":
+      return "Your account isn't a member of this company. Switch to a company you belong to.";
+    case "missing_company":
+      return "No company is selected. Finish onboarding or pick a workspace, then retry.";
+    case "lock_active":
+      return "A run is already active for this company. Wait for it to finish, or use “Expire stale runs” if it's stuck.";
+    case "schema_migration_missing":
+      return "The run table is missing required columns. Run `supabase db push` (applies 20260619000000_run_schema_repair.sql) and reload the PostgREST schema cache, then click “Test Edge Function health” and confirm run_schema_ready: true.";
+    case "db_insert_failed":
+      return "A database write failed. Confirm the run-table migrations are applied to this project.";
+    case "consistency_warning":
+      return "The run completed but counts didn't fully reconcile. Open “View run events” for the failing check.";
+    default:
+      return "Check the Supabase Edge Function logs, then click “Test Edge Function health” to localize the failure.";
+  }
+}
+
+function formatAgo(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  return `${Math.round(secs / 3600)}h ago`;
+}
+
+function formatElapsed(start: string | null | undefined, end: string | null | undefined): string {
+  if (!start) return "—";
+  const ms = (end ? new Date(end).getTime() : Date.now()) - new Date(start).getTime();
+  const secs = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(secs / 60);
+  const s = secs % 60;
+  return m > 0 ? `${m}m ${s}s` : `${s}s`;
+}
+
+// Projects a persisted run snapshot onto the existing pipeline-step UI. The DB
+// is the single source of truth; this is a pure render mapping.
+function snapshotToPipelineState(snap: RunProgressSnapshot): PipelineState {
+  const idx = snap.current_stage_index ?? 0; // 1-based; 0 = queued
+  const failed = snap.status === "failed" || snap.status === "expired";
+  const done = snap.status === "completed" || snap.status === "completed_with_warnings";
+  const steps = SERVER_STAGES.map((s, i) => {
+    const n = i + 1;
+    let status: PipelineStepStatus;
+    if (done) status = "complete";
+    else if (failed) status = n === idx ? "failed" : n < idx ? "complete" : "pending";
+    else if (n < idx) status = "complete";
+    else if (n === idx) status = "running";
+    else status = "pending";
+    return {
+      id: s.id,
+      label: s.label,
+      status,
+      error: n === idx && failed ? (snap.error_message ?? undefined) : undefined,
+    };
+  });
+  return {
+    running: snap.status === "running" || snap.status === "queued",
+    steps,
+    currentStepId: SERVER_STAGES[Math.max(0, idx - 1)]?.id ?? null,
+    error: failed ? (snap.error_message || snap.note || "Run expired.") : null,
+    completedAt: done ? new Date(snap.completed_at ?? Date.now()) : null,
+  };
+}
+
 type Company = {
   id: string;
   name: string;
@@ -340,7 +487,7 @@ type NumberExplanation = {
   caveat?: string;
 };
 
-export default function DashboardPage() {
+export default function DashboardPage({ view = "dashboard" }: { view?: "dashboard" | "risks" }) {
   const [company, setCompany] = useState<Company | null>(null);
   const [entities, setEntities] = useState<Entity[]>([]);
   const [events, setEvents] = useState<RawEvent[]>([]);
@@ -357,6 +504,8 @@ export default function DashboardPage() {
   const [, setConnections] = useState<CompanyConnection[]>([]);
 const [impactPaths, setImpactPaths] = useState<ImpactPath[]>([]);
 const [calibration, setCalibration] = useState<CompanyCalibrationInput | null>(null);
+const [workbenchCalibration, setWorkbenchCalibration] = useState<CompanyCalibrationInput | null>(null);
+const [verifiedShocks, setVerifiedShocks] = useState<VerifiedShockRow[]>([]);
 
 const [matchedConnectionsByItemId, setMatchedConnectionsByItemId] = useState<
   Record<string, MatchedConnectionPath[]>
@@ -371,7 +520,21 @@ const [signalStats, setSignalStats] = useState({
   const [expandedOpportunityIds, setExpandedOpportunityIds] = useState<Set<string>>(new Set());
   const [showRawEvents, setShowRawEvents] = useState(false);
   const [showAdvancedPipeline, setShowAdvancedPipeline] = useState(false);
+  const [schedulerRefresh, setSchedulerRefresh] = useState(0);
   const [pipelineState, setPipelineState] = useState<PipelineState>(getInitialPipelineState());
+  // The summary_id of the run we're observing from the DB. While set, the
+  // polling effect renders live progress. The browser does NOT execute the run.
+  const [activeRunSummaryId, setActiveRunSummaryId] = useState<string | null>(null);
+  const [runSnapshot, setRunSnapshot] = useState<RunProgressSnapshot | null>(null);
+  // Last progress signature we printed to console — so we log on CHANGE, not on
+  // every poll/render.
+  const lastProgressSigRef = useRef<string>("");
+  // Structured start-failure (error_code + stage) so the UI never shows a bare
+  // "Failed to send a request to the Edge Function".
+  const [startError, setStartError] = useState<StartRunErr | null>(null);
+  const [edgeHealth, setEdgeHealth] = useState<EdgeHealth | null>(null);
+  const [healthBusy, setHealthBusy] = useState(false);
+  const [runEvents, setRunEvents] = useState<RunEvent[] | null>(null);
 
   function toggleRiskId(id: string) {
     setExpandedRiskIds(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -397,6 +560,7 @@ const [signalStats, setSignalStats] = useState({
   }
 
   const [loading, setLoading] = useState(true);
+  const [dashError, setDashError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
 
   useEffect(() => {
@@ -419,7 +583,7 @@ if (savedCompanyId) {
 const { data: companies, error: companyError } = await companyQuery;
 
     if (companyError) {
-      alert(companyError.message);
+      setDashError(companyError.message);
       setLoading(false);
       return;
     }
@@ -427,12 +591,6 @@ const { data: companies, error: companyError } = await companyQuery;
     const latestCompany = companies?.[0];
 if (latestCompany) {
   localStorage.setItem("groundsense_company_id", latestCompany.id);
-
-  console.log("Dashboard loading company:", {
-    id: latestCompany.id,
-    name: latestCompany.name,
-    created_at: latestCompany.created_at,
-  });
 }
     if (!latestCompany) {
       setLoading(false);
@@ -589,6 +747,19 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
       // calibration is non-critical — dashboard still works without it
     }
 
+    // Load verified external shocks (Free Source Fusion). Non-critical.
+    try {
+      const { data: shocks } = await supabase
+        .from("verified_shocks")
+        .select("*")
+        .eq("company_id", latestCompany.id)
+        .order("confidence_score", { ascending: false })
+        .limit(200);
+      setVerifiedShocks((shocks ?? []) as VerifiedShockRow[]);
+    } catch {
+      // verified shocks are non-critical
+    }
+
     setLoading(false);
   }
 
@@ -605,34 +776,263 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
     }
   }
 
-  async function handleRunIntelligenceUpdate() {
+  // Core: starts a fully SERVER-OWNED run. The browser only (1) pre-seeds
+  // tracking signals (fast, idempotent), (2) asks the edge function to start,
+  // (3) hands the run_id to the polling effect. After this returns, closing the
+  // tab, refreshing, losing network, or logging out does NOT stop/expire the run.
+  async function beginServerRun(options: {
+    force?: boolean;
+    runMode?: string;
+    debug?: boolean;
+    dryRun?: boolean;
+    queryCap?: number;
+    maxArticlesPerQuery?: number;
+    cleanupAfter?: boolean;
+  }) {
     if (!company) return;
-    if (busy !== null || pipelineState.running) return;
+    if (isDemoMode()) {
+      setStartError({ ok: false, errorCode: "demo_read_only", message: "The demo workspace is read-only.", httpStatus: 403 });
+      return;
+    }
+    if (busy !== null || activeRunSummaryId || pipelineState.running) return;
     setBusy("pipeline");
-    setPipelineState(getInitialPipelineState());
+    setStartError(null);
+    setRunEvents(null);
+    setRunSnapshot(null);
+    lastProgressSigRef.current = "";
+    setPipelineState({ ...getInitialPipelineState(), running: true });
+
     try {
-      await runIntelligenceUpdatePipeline(company.id, (state) => {
-        setPipelineState({ ...state });
+      // Materialize tracking queries before the server fetch runs (idempotent,
+      // fast — NOT the long pipeline loop).
+      try {
+        await seedCompanySignals(company.id);
+      } catch (e) {
+        console.warn("[GroundSense] signal pre-seed failed (continuing)", e);
+      }
+
+      const outcome = await startIntelligenceRun({
+        companyId: company.id,
+        runMode: options.runMode ?? "full",
+        force: options.force,
+        debug: options.debug,
+        dryRun: options.dryRun,
+        queryCap: options.queryCap,
+        maxArticlesPerQuery: options.maxArticlesPerQuery,
+        cleanupAfter: options.cleanupAfter,
       });
-      await loadDashboard();
-    } finally {
+
+      if (!outcome.ok) {
+        // Structured failure — show exact code + stage, and auto-probe health.
+        setStartError(outcome);
+        setPipelineState((p) => ({ ...p, running: false, error: `[${outcome.errorCode}] ${outcome.message}` }));
+        setBusy(null);
+        setSchedulerRefresh((k) => k + 1);
+        void checkEdgeHealth().then(setEdgeHealth).catch(() => {});
+        return;
+      }
+
+      console.info("[GroundSense run progress] started", { runId: outcome.runId, summaryId: outcome.summaryId, status: outcome.status });
+      setActiveRunSummaryId(outcome.summaryId); // begins polling
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setStartError({ ok: false, errorCode: "client_exception", message: msg, httpStatus: null });
+      setPipelineState((p) => ({ ...p, running: false, error: `Could not start run. ${msg}` }));
       setBusy(null);
+      setSchedulerRefresh((k) => k + 1);
     }
   }
 
+  function handleRunIntelligenceUpdate(force = false) {
+    void beginServerRun({ force, runMode: "full" });
+  }
+
+  // Ultra Debug: full server stages, capped queries/articles, server keys only.
+  function handleUltraDebugRun() {
+    void beginServerRun({ runMode: "ultra_debug", force: true, debug: true, queryCap: 10, maxArticlesPerQuery: 10 });
+  }
+  // Dry run: fetch + normalize + score, but NO inserts/generation (quota-safe).
+  function handleDryRun() {
+    void beginServerRun({ runMode: "ultra_debug", force: true, debug: true, dryRun: true, queryCap: 3, maxArticlesPerQuery: 10 });
+  }
+
+  async function handleTestEdgeHealth() {
+    setHealthBusy(true);
+    try {
+      const h = await checkEdgeHealth();
+      setEdgeHealth(h);
+    } finally {
+      setHealthBusy(false);
+    }
+  }
+
+  async function handleExpireStaleRuns() {
+    if (!company) return;
+    await expireStaleRuns(company.id);
+    setActiveRunSummaryId(null);
+    setBusy((b) => (b === "pipeline" ? null : b));
+    setSchedulerRefresh((k) => k + 1);
+    await loadDashboard();
+  }
+
+  async function handleViewRunEvents() {
+    if (!company) return;
+    let summaryId = runSnapshot?.id ?? activeRunSummaryId ?? null;
+    if (!summaryId) {
+      const { data } = await supabase
+        .from("intelligence_run_summaries")
+        .select("id")
+        .eq("company_id", company.id)
+        .order("started_at", { ascending: false })
+        .limit(1);
+      summaryId = (data?.[0] as { id: string } | undefined)?.id ?? null;
+    }
+    if (!summaryId) { setRunEvents([]); return; }
+    setRunEvents(await getRunEvents(summaryId, 60));
+  }
+
+  // "Stop / Reset" now only DISMISSES the local progress view + stops the
+  // browser from polling. It deliberately does NOT kill the server run — run
+  // liveness is owned by the server worker's heartbeat, never the browser.
   function handleStopResetPipeline() {
     stopPipeline();
     resetPipeline();
-    setPipelineState(prev => ({
-      ...prev,
-      running: false,
-      error: prev.running ? "Pipeline stopped by user." : null,
-      steps: prev.steps.map(s =>
-        s.status === "running" ? { ...s, status: "skipped" } : s
-      ),
-    }));
+    setActiveRunSummaryId(null);
+    setRunSnapshot(null);
+    setPipelineState(getInitialPipelineState());
     if (busy === "pipeline") setBusy(null);
   }
+
+  // ── Poll the active run from the DB (the SOLE source of truth) ─────────────
+  // Survives tab switches, refreshes, route changes, and auth refresh because
+  // the state lives in the database, not in browser memory.
+  useEffect(() => {
+    if (!activeRunSummaryId) return;
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const poll = async () => {
+      let snap: RunProgressSnapshot | null = null;
+      try {
+        snap = await getRunProgress(activeRunSummaryId);
+      } catch (e) {
+        console.warn("[GroundSense run progress] poll error", e);
+      }
+      if (cancelled) return;
+
+      if (!snap) {
+        // Run row vanished — stop cleanly.
+        setActiveRunSummaryId(null);
+        setBusy((b) => (b === "pipeline" ? null : b));
+        return;
+      }
+
+      // Server-worker liveness: if the run still says running/queued but the
+      // SERVER heartbeat has gone silent for >5 min, the worker died (NOT the
+      // browser). Expire it so the run row + button never get stuck forever.
+      const heartbeatMs = snap.heartbeat_at ? new Date(snap.heartbeat_at).getTime() : new Date(snap.started_at).getTime();
+      const heartbeatStale = Date.now() - heartbeatMs > 5 * 60_000;
+      if (!TERMINAL_RUN_STATUSES.has(snap.status) && heartbeatStale) {
+        if (company) await expireStaleRuns(company.id);
+        setActiveRunSummaryId(null);
+        setBusy((b) => (b === "pipeline" ? null : b));
+        setPipelineState((p) => ({ ...p, running: false, error: "Run expired: server worker heartbeat stopped for over 5 minutes." }));
+        setSchedulerRefresh((k) => k + 1);
+        await loadDashboard();
+        return;
+      }
+
+      setRunSnapshot(snap);
+      setPipelineState(snapshotToPipelineState(snap));
+
+      // Console progress — print on CHANGE only, sourced from persisted DB state.
+      const sig = [
+        snap.status, snap.current_stage, snap.progress_pct,
+        snap.articles_inserted, snap.candidates_generated, snap.candidates_published,
+        snap.heartbeat_at,
+      ].join("|");
+      if (sig !== lastProgressSigRef.current) {
+        lastProgressSigRef.current = sig;
+        console.info("[GroundSense run progress]", {
+          runId: snap.pipeline_run_id,
+          status: snap.status,
+          stage: snap.current_stage,
+          stageLabel: snap.current_stage_label,
+          progressPct: snap.progress_pct,
+          counters: {
+            queries_executed: snap.queries_executed,
+            articles_fetched: snap.articles_fetched,
+            articles_inserted: snap.articles_inserted,
+            candidates_generated: snap.candidates_generated,
+            candidates_published: snap.candidates_published,
+            candidates_review: snap.candidates_review,
+            candidates_quarantined: snap.candidates_quarantined,
+            verified_shocks_created: snap.verified_shocks_created,
+          },
+          latestEvent: snap.latestEvent?.message,
+          heartbeatAt: snap.heartbeat_at,
+        });
+        if (snap.run_mode === "ultra_debug") {
+          console.info("[GroundSense UltraDebug]", {
+            runId: snap.pipeline_run_id,
+            stage: snap.current_stage,
+            status: snap.status,
+            progressPct: snap.progress_pct,
+            counters: {
+              queries_executed: snap.queries_executed,
+              articles_fetched: snap.articles_fetched,
+              articles_normalized: snap.articles_normalized,
+              articles_inserted: snap.articles_inserted,
+              company_evaluations_created: snap.company_evaluations_created,
+              candidates_generated: snap.candidates_generated,
+            },
+            latestEvent: snap.latestEvent?.message,
+          });
+        }
+      }
+
+      if (TERMINAL_RUN_STATUSES.has(snap.status)) {
+        setActiveRunSummaryId(null);
+        setBusy((b) => (b === "pipeline" ? null : b));
+        setSchedulerRefresh((k) => k + 1);
+        await loadDashboard(); // refresh dashboard with the completed run's output
+        return;
+      }
+
+      timer = window.setTimeout(poll, 3000);
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [activeRunSummaryId]);
+
+  // ── On mount / company change: resume an already-running server run ───────
+  // If a run is alive in the DB (server heartbeat fresh), reattach to it so a
+  // refresh or browser reopen shows live progress instead of nothing.
+  useEffect(() => {
+    if (!company || isDemoMode()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const snap = await getActiveRunForCompany(company.id);
+        if (cancelled || !snap) return;
+        setRunSnapshot(snap);
+        setPipelineState(snapshotToPipelineState(snap));
+        setBusy((b) => b ?? "pipeline");
+        setActiveRunSummaryId(snap.id);
+        console.info("[GroundSense run progress] resumed active run from DB", {
+          runId: snap.pipeline_run_id, status: snap.status, stage: snap.current_stage,
+        });
+      } catch (e) {
+        console.warn("[GroundSense] active-run resume check failed", e);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [company?.id]);
 
   async function updateActionStatus(actionId: string, status: string) {
     const { error } = await supabase
@@ -691,14 +1091,26 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
     (risk) => risk.display_section === "watchlist"
   );
 
+  // Risk ids backed by a verified external shock (source fusion) — additive gate signal.
+  const _verifiedShockRiskIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const r of [..._allRiskItems, ..._allOperatingChanges, ..._allWatchlistItems]) {
+      const prov = buildIssueProvenance({ title: r.risk_title, category: r.issue_category, hasCalibratedOverlay: false }, verifiedShocks);
+      // Only a PRIMARY verified/manual shock boosts the gate — "support" (BLS PPI) does not.
+      if (prov.hasVerifiedShock && prov.externalStatusTone !== "support") ids.add(r.id);
+    }
+    return ids;
+  }, [risks, verifiedShocks]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Quality gate: evaluate all generated candidates
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const _gateResults = useMemo(
     () => runQualityGateOnAll(
       [..._allRiskItems, ..._allOperatingChanges, ..._allWatchlistItems],
-      opportunities
+      opportunities,
+      _verifiedShockRiskIds
     ),
-    [risks, opportunities] // eslint-disable-line react-hooks/exhaustive-deps
+    [risks, opportunities, _verifiedShockRiskIds] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
   // Published (executive-facing): only items that pass the gate
@@ -763,6 +1175,179 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   });
 
   const blockedOpportunityCount = candidateQueueItems.filter(i => i.type === "opportunity").length;
+
+  // Canonical candidate taxonomy — used consistently across KPI, Opportunity Pipeline,
+  // Risks "Items not promoted", and Quality Gate so the counts never disagree.
+  const candidateSummary = {
+    approved: publishedOpportunities.length,
+    pendingReview: candidateQueueItems.filter((i) => i.gateResult.decision === "candidate_review").length,
+    quarantined: candidateQueueItems.filter((i) => i.gateResult.decision === "quarantine").length,
+  };
+  const candidateSummaryLine =
+    `${candidateSummary.approved} approved · ${candidateSummary.pendingReview} pending review` +
+    (candidateSummary.quarantined > 0 ? ` · ${candidateSummary.quarantined} quarantined` : "");
+
+  // Calibration Center workbench — single shared instance (drives both the top
+  // metric and the Calibration Center section). Derived overrides flow back into
+  // the effective calibration used by Operating Model Completeness + Scenario Editor.
+  const calibrationController = useCalibrationWorkbench(
+    company?.id ?? null,
+    calibration,
+    blockedOpportunityCount,
+    setWorkbenchCalibration
+  );
+  // Merge base calibration with workbench-derived overrides so BOTH survive: workbench
+  // values (freight/steel spend, etc.) win, but base-only fields (pass_through_coverage_pct,
+  // gross margin, …) are preserved. Picking one or the other dropped base fields and caused
+  // the tariff estimate's pass-through lookup to come back null → false scenario fallback.
+  const effectiveCalibration = (calibration || workbenchCalibration)
+    ? ({ ...(calibration ?? {}), ...(workbenchCalibration ?? {}) } as CompanyCalibrationInput)
+    : null;
+  const calibrationCoverage = calibrationController.workbench.summary.modelReliability;
+
+  // Labeled calibrated-exposure overlay (Part 8) — recomputed from imported rows,
+  // shown alongside (never replacing) the stored evidence-backed/scenario values.
+  const freightRowCount = calibrationController.state.domains.freight?.rows.length ?? 0;
+  const supplierRowCount = calibrationController.state.domains.supplier?.rows.length ?? 0;
+  const freightCalibrated = freightRowCount > 0 ? freightCalibratedExposure(effectiveCalibration, freightRowCount) : null;
+  const steelCalibrated = supplierRowCount > 0 ? steelCalibratedExposure(effectiveCalibration, supplierRowCount) : null;
+  const calibratedKeys = Object.keys(calibrationController.workbench.derivedOverrides);
+
+  // Executive Point-Estimate Mode — source-backed point estimates per issue (view-model only;
+  // original risk_register ranges are never overwritten, only hidden behind methodology).
+  const execMode = EXECUTIVE_POINT_ESTIMATE_MODE;
+  // Computed fresh each render (like issue provenance) so it always reflects the latest
+  // verified shocks + merged calibration — avoids memo staleness on async data loads.
+  // Executive value/graph/driver derive from ALL active published issues (risks AND
+  // operating changes), never only the risk_register section. A run that reclassifies the
+  // tariff into the operating-changes section must NOT drop it from value at stake / exposure
+  // graph / driver map — that was the regression where tariff vanished from exec but stayed
+  // in outcome tracking (internal inconsistency).
+  const execPublishedIssues = [...riskItems, ...operatingChanges];
+  const execByIssueId = new Map<string, ExecutiveEstimate>();
+  for (const r of execPublishedIssues) {
+    execByIssueId.set(r.id, getExecutiveImpactEstimate(r, verifiedShocks, effectiveCalibration));
+  }
+  const execRiskEstimates = execPublishedIssues
+    .map((r) => execByIssueId.get(r.id))
+    .filter((e): e is ExecutiveEstimate => !!e);
+  const execTotalRisk = sumExecutiveEstimates(execRiskEstimates);
+  const execFreight = execRiskEstimates.find((e) => e.kind === "freight") ?? null;
+  const execTariff = execRiskEstimates.find((e) => e.kind === "tariff") ?? null;
+  // Section-scoped exec totals so the Risks page never attaches the full freight+tariff total
+  // to the risk-only register: Risk Register shows risk-section only, Operating Changes shows
+  // operating-change section only, and execTotalRisk remains the page-level value at stake.
+  const execRiskSectionTotal = sumExecutiveEstimates(
+    riskItems.map((r) => execByIssueId.get(r.id)).filter((e): e is ExecutiveEstimate => !!e)
+  );
+  const execChangeSectionTotal = sumExecutiveEstimates(
+    operatingChanges.map((r) => execByIssueId.get(r.id)).filter((e): e is ExecutiveEstimate => !!e)
+  );
+  // Issue title -> executive point-estimate display (for the Driver Priority Map) — over all
+  // active published issues so the tariff driver carries its estimate regardless of section.
+  const execImpactByTitle: Record<string, string> = {};
+  for (const r of execPublishedIssues) {
+    const e = execByIssueId.get(r.id);
+    if (e && r.risk_title) execImpactByTitle[r.risk_title] = e.value === null ? "Needs validation" : `${e.display} · ${e.sourceLabel}`;
+  }
+
+  // Real action owner/due per issue_key, so the Exposure Graph action nodes match the
+  // Executive Actions card (same canonical risk_actions records — no hardcoded graph dates).
+  // Formatted identically to ActionRoiPanel.formatDate so the displayed dates agree exactly.
+  const fmtActionDue = (d: string | null | undefined) =>
+    d ? new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+  const actionByIssueKey = new Map<string, { owner: string; due: string }>();
+  for (const a of actions as any[]) {
+    if (a.issue_key && !actionByIssueKey.has(a.issue_key)) {
+      actionByIssueKey.set(a.issue_key, { owner: a.owner ?? "", due: fmtActionDue(a.deadline) });
+    }
+  }
+
+  // Company Exposure Graph — canonical 2D operating map. Consumes the same exec estimates
+  // as the dashboard cards (never recomputes a different total).
+  // Every published active issue (risk + operating change) must materialize an
+  // exposure path. Canonical freight/tariff paths are deduped by driver inside
+  // the view model, so demo behavior is unchanged; article-derived issues
+  // (e.g. steel/supplier) now appear instead of yielding 0 active paths.
+  // Real calibrated exposure basis + scenario formula for an issue's driver — so
+  // the exposure path shows actual inputs ("$37.6M steel-linked spend × 20%
+  // unpassed …") instead of placeholder text. Returns nulls when there's no
+  // calibrated basis (the path then honestly says "calibration pending").
+  const calForGraph = (effectiveCalibration ?? {}) as Record<string, unknown>;
+  const posNum = (v: unknown) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : null; };
+  const fmtSpend = (v: number) => (v >= 1e6 ? `$${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `$${Math.round(v / 1e3)}K` : `$${Math.round(v)}`);
+  const driverBasis = (driver: string): { label: string; spend: number | null; movement: string } => {
+    if (driver === "freight") return { label: "freight", spend: posNum(calForGraph.freight_spend), movement: "logistics rate movement" };
+    if (/copper/.test(driver)) return { label: "copper-linked", spend: posNum(calForGraph.copper_spend), movement: "imported-component cost movement" };
+    if (/alumin/.test(driver)) return { label: "aluminum-linked", spend: posNum(calForGraph.aluminum_spend), movement: "imported-component cost movement" };
+    if (/steel|tariff|commodity|supply/.test(driver)) return { label: "steel-linked", spend: posNum(calForGraph.steel_spend), movement: "imported-component cost movement" };
+    return { label: "", spend: null, movement: "external cost movement" };
+  };
+
+  const publishedIssuesForGraph = [...riskItems, ...operatingChanges].map((r) => {
+    const est = execByIssueId.get(r.id) ?? null;
+    const lo = Number(r.impact_low || 0);
+    const hi = Number(r.impact_high || 0);
+    const impactDisplay =
+      est && est.value !== null
+        ? est.display
+        : lo || hi
+          ? `${formatExecutiveEstimate(lo)}–${formatExecutiveEstimate(hi)}`
+          : "Needs validation";
+    const action = publishedActions.find((a) => a.risk_id === r.id) ?? null;
+    const driver = isFreightIssue(r)
+      ? "freight"
+      : isTariffIssue(r)
+        ? "tariff"
+        : (String(r.issue_category || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "supply");
+    const evidenceBacked = getIssueModelStatus(r.methodology).status === "evidence_backed";
+    // Build a real exposure basis + formula from calibration for this driver.
+    const basis = driverBasis(driver);
+    const passThrough = posNum(calForGraph.pass_through_coverage_pct);
+    const unpassed = passThrough != null ? Math.round(100 - passThrough) : null;
+    const exposureText = basis.spend != null
+      ? `${fmtSpend(basis.spend)} ${basis.label} spend exposed to ${basis.movement}${unpassed != null ? `; ${unpassed}% unpassed after ${Math.round(passThrough!)}% pass-through coverage` : ""}.`
+      : null;
+    const calculation = basis.spend != null
+      ? `${evidenceBacked ? "" : "Scenario estimate — "}${fmtSpend(basis.spend)} ${basis.label} spend${unpassed != null ? ` × ${unpassed}% unpassed` : ""} × cost sensitivity → ${impactDisplay}. Validate sensitivity against supplier/lane price updates.`
+      : null;
+    return {
+      id: r.id,
+      title: r.risk_title,
+      driver,
+      issueType: isTariffIssue(r) ? "Operating Change" : "Operating Risk",
+      impactDisplay,
+      calculation,
+      exposureText,
+      evidenceStatus:
+        getIssueModelStatus(r.methodology).status === "evidence_backed"
+          ? "evidence_backed"
+          : "scenario_modeled",
+      sourceLabel: r.issue_category ? String(r.issue_category).replace(/_/g, " ") : null,
+      action: action
+        ? { title: action.title, owner: action.owner || "Unassigned", due: fmtActionDue(action.deadline), nextStep: null }
+        : null,
+    };
+  });
+
+  const exposureGraphModel = buildExposureGraphViewModel({
+    execFreight,
+    execTariff,
+    verifiedShocks,
+    calibration: effectiveCalibration,
+    blockedCandidateTitles: candidateQueueItems.filter((i) => i.type === "opportunity").map((i) => i.title),
+    valueAtStakeDisplay: formatExecutiveEstimate(execTotalRisk),
+    freightAction: actionByIssueKey.get("freight_logistics_pressure"),
+    tariffAction: actionByIssueKey.get("tariff_trade_policy_relief"),
+    publishedIssues: publishedIssuesForGraph,
+  });
+
+  // Canonical issue taxonomy: tariff items are Operating Changes, not downside risks.
+  const canonicalRiskCount = riskItems.filter((r) => !isTariffIssue(r)).length;
+  const canonicalChangeCount = operatingChanges.length + riskItems.filter((r) => isTariffIssue(r)).length;
+  const pluralize = (n: number, s: string) => `${n} ${s}${n === 1 ? "" : "s"}`;
+  const oppLabel = publishedOpportunities.length === 1 ? "1 opportunity" : `${publishedOpportunities.length} opportunities`;
+  const canonicalIssueSubtitle = `${pluralize(canonicalRiskCount, "risk")} · ${pluralize(canonicalChangeCount, "operating change")} · ${watchlistItems.length} watch · ${oppLabel}`;
 
 const totalRiskHigh = riskItems.reduce(
   (sum, risk) => sum + Number(risk.impact_high || 0),
@@ -846,14 +1431,6 @@ function riskExposureSubtitle() {
     0
   );
 
-  const openActions = publishedActions.filter(
-    (action) => action.status !== "completed"
-  ).length;
-
-  // Freight-specific range for exposure graph (not total risk)
-  const freightRiskLow = riskItems.filter(r => isFreightIssue(r)).reduce((s, r) => s + Number(r.impact_low || 0), 0);
-  const freightRiskHigh = riskItems.filter(r => isFreightIssue(r)).reduce((s, r) => s + Number(r.impact_high || 0), 0);
-
   // All evidence (including from rejected items) for the Evidence Sources metric
   const allEvidenceItems: any[] = [
     ...riskItems.flatMap((r) => r.evidence_items || []),
@@ -872,7 +1449,7 @@ function riskExposureSubtitle() {
       : 0;
 
   const actionRoiItems = useMemo((): ActionRoiItem[] => {
-    return publishedActions.map((action) => {
+    const items: ActionRoiItem[] = publishedActions.map((action) => {
       const linkedRisk = action.risk_id
         ? risks.find((r) => r.id === action.risk_id)
         : null;
@@ -889,6 +1466,21 @@ function riskExposureSubtitle() {
         ? "Validate tariff relief — confirm supplier landed-cost updates and remaining exposure"
         : action.title;
 
+      // Executive point-estimate benefit/protected value from the linked issue (no ranges).
+      const execEst = linkedRisk ? execByIssueId.get(linkedRisk.id) ?? null : null;
+      const execBenefit = execEst
+        ? execEst.value === null
+          ? "Needs validation"
+          : execEst.kind === "freight"
+          ? `${execEst.display} current-period cost pressure under review`
+          : `${execEst.display} value at stake`
+        : null;
+      const execProtected = execEst && execEst.value !== null
+        ? execEst.kind === "tariff"
+          ? `${execEst.display} tariff relief validation opportunity`
+          : `${formatExecutiveEstimate(execEst.value * 0.2)} if action reduces impact by 20%`
+        : null;
+
       return {
         id: action.id,
         title: safeTitle,
@@ -900,22 +1492,65 @@ function riskExposureSubtitle() {
         expectedBenefitHigh: linkedRisk ? linkedRisk.impact_high : (linkedOpp ? linkedOpp.revenue_high : null),
         effortLevel: derivedFields.effortLevel,
         protectedValue: linkedRisk ? linkedRisk.impact_low : null,
+        execBenefit,
+        execProtected,
         successCondition: derivedFields.successCondition,
         nextStep: derivedFields.nextStep,
         decisionTrigger: derivedFields.decisionTrigger,
         outcomeStatus: action.status === "completed" ? "Completed" : "Open — awaiting validation",
       };
     });
-  }, [publishedActions, risks, opportunities]);
+
+    // Derive a validation action for active published operating changes that have no real
+    // action row (the generator only creates actions for risk-section issues, so the tariff
+    // relief operating change otherwise loses its action). Keeps actions in sync with the
+    // active published executive issues, regardless of which section a run placed them in.
+    const linkedIssueIds = new Set(publishedActions.map((a) => a.risk_id).filter(Boolean));
+    for (const oc of operatingChanges) {
+      if (linkedIssueIds.has(oc.id)) continue;
+      const execEst = execByIssueId.get(oc.id) ?? null;
+      const tariff = isTariffIssue(oc);
+      if (!tariff && !(execEst && execEst.value !== null)) continue; // only actionable, dollarized changes
+      const dl = new Date();
+      dl.setUTCDate(dl.getUTCDate() + 25);
+      items.push({
+        id: `derived-action-${oc.id}`,
+        title: tariff
+          ? "Validate tariff relief — confirm supplier landed-cost updates and remaining exposure"
+          : `Validate ${oc.risk_title}`,
+        linkedIssueTitle: oc.risk_title,
+        owner: tariff ? "Head of Procurement" : "Operating Owner",
+        deadline: dl.toISOString().slice(0, 10),
+        status: "open",
+        expectedBenefitLow: oc.impact_low,
+        expectedBenefitHigh: oc.impact_high,
+        effortLevel: "Medium",
+        protectedValue: oc.impact_low,
+        execBenefit: execEst && execEst.value !== null ? `${execEst.display} tariff relief validation opportunity` : null,
+        execProtected: null,
+        successCondition: "Supplier landed-cost updates confirmed; affected SKUs and open-PO exposure validated.",
+        nextStep:
+          "Pull supplier country-of-origin list and validate steel-linked import exposure; flag aluminum/copper separately if additional tariff metrics or supplier evidence are available.",
+        decisionTrigger: "Treat modeled relief as realized only after procurement validates supplier landed costs.",
+        outcomeStatus: "Open — awaiting validation",
+      });
+    }
+    return items;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [publishedActions, risks, opportunities, execByIssueId, operatingChanges]);
+
+  // Open actions = active (non-completed) actions across the full action list, including
+  // the derived operating-change validation actions above.
+  const openActions = actionRoiItems.filter((a) => a.status !== "completed").length;
 
   const driverPriorityReport = useMemo(
     () => computeDriverPriority(
       riskItems,
       publishedOpportunities,
-      calibration as Record<string, number | null> | null,
+      effectiveCalibration as Record<string, number | null> | null,
       operatingChanges
     ),
-    [riskItems, publishedOpportunities, calibration, operatingChanges]
+    [riskItems, publishedOpportunities, effectiveCalibration, operatingChanges]
   );
 
   const forecastRows = useMemo(() => {
@@ -930,7 +1565,8 @@ function riskExposureSubtitle() {
         const modelStatus = getIssueModelStatus(r.methodology);
         return {
           issueId: r.id,
-          issueType: "risk" as const,
+          // Canonical taxonomy: tariff items render as Operating Change, not Risk.
+          issueType: (isTariffIssue(r) ? "operating_change" : "risk") as "risk" | "operating_change",
           title: r.risk_title,
           forecastDate: null as string | null,
           predictedLow: r.impact_low,
@@ -938,7 +1574,10 @@ function riskExposureSubtitle() {
           currentStatus: safeStatus,
           outcomeStatus: "open" as const,
           actualImpact: null as number | null,
-          outcomeNotes: modelStatus.status === "scenario_fallback"
+          execEstimate: execByIssueId.get(r.id)?.display ?? "Needs validation",
+          outcomeNotes: execMode
+            ? (isFreightIssue(r) ? "Lane-specific freight-rate validation pending" : "Validation pending")
+            : modelStatus.status === "scenario_fallback"
             ? "Scenario-modeled — awaiting validation"
             : null,
         };
@@ -960,6 +1599,7 @@ function riskExposureSubtitle() {
           currentStatus: safeStatus,
           outcomeStatus: "awaiting_data" as const,
           actualImpact: null as number | null,
+          execEstimate: execByIssueId.get(r.id)?.display ?? "Needs validation",
           outcomeNotes: "Awaiting procurement validation",
         };
       }),
@@ -987,6 +1627,7 @@ function riskExposureSubtitle() {
             ? ("monitoring_only" as const)
             : ("open" as const),
           actualImpact: null as number | null,
+          execEstimate: "Needs validation",
           outcomeNotes: quality === "needs_validation"
             ? "Not eligible for accuracy scoring until validated"
             : quality === "candidate"
@@ -995,17 +1636,19 @@ function riskExposureSubtitle() {
         };
       }),
     ];
-  }, [riskItems, operatingChanges, publishedOpportunities]);
-
-  const modelCompletenessReport = useMemo(
-    () => computeOperatingModelCompleteness(calibration),
-    [calibration]
-  );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [riskItems, operatingChanges, publishedOpportunities, execByIssueId]);
 
   if (loading) {
     return (
       <main className="dashboard-page">
-        <div className="dashboard-container">Loading...</div>
+        <div className="dashboard-container" aria-label="Loading dashboard" aria-busy="true">
+          <div className="skeleton-grid">
+            {[...Array(6)].map((_, i) => <div key={i} className="skeleton-metric" aria-hidden="true" />)}
+          </div>
+          <div className="skeleton-card" aria-hidden="true" />
+          <div className="skeleton-card skeleton-card--short" aria-hidden="true" />
+        </div>
       </main>
     );
   }
@@ -1013,70 +1656,191 @@ function riskExposureSubtitle() {
   return (
     <main className="dashboard-page">
       <div className="dashboard-container">
+        {dashError && (
+          <div className="dash-error-banner" role="alert">
+            <strong>Error loading dashboard:</strong> {dashError}
+          </div>
+        )}
         <header className="dashboard-header">
           <div>
-            <p className="eyebrow">GroundSense</p>
-            <h1 className="dashboard-title">Executive Intelligence</h1>
+            <h1 className="dashboard-title">{view === "risks" ? "Risks" : "Executive Intelligence"}</h1>
             <p className="dashboard-subtitle">
-              Company-specific risk, opportunity, methodology, connections, and
-              action tracking.
+              {view === "risks"
+                ? "Published issues, operating changes, candidate review, and evidence quality."
+                : `Verified external shocks mapped to ${company?.name ?? "your company's"} exposure, P&L impact, and actions.`}
             </p>
+            {view === "risks" && (
+              <p className="dashboard-subtitle" style={{ marginTop: 6, fontWeight: 600, color: "var(--text-secondary)" }}>
+                {pluralize(riskItems.length + operatingChanges.length, "published item")} · {formatExecutiveEstimate(execTotalRisk)} total value at stake · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
+              </p>
+            )}
           </div>
 
         </header>
 
-        {/* ── Primary toolbar ── */}
+        {!isDemoMode() &&
+          riskItems.length === 0 &&
+          operatingChanges.length === 0 &&
+          watchlistItems.length === 0 &&
+          candidateQueueItems.length === 0 && (
+            <section className="gs-empty-state">
+              <h2 className="gs-empty-title">No published issues yet</h2>
+              <p className="gs-empty-body">
+                {view === "risks"
+                  ? "Once you run an intelligence update, verified risks and operating changes will appear here, scoped to your company."
+                  : "Add your operating data, then run your first intelligence update to turn external shocks into company-specific exposure."}
+              </p>
+              <ul className="gs-empty-steps">
+                <li>Upload supplier data to validate tariff exposure.</li>
+                <li>Upload freight lanes to quantify logistics risk.</li>
+                <li>Run an intelligence update to generate your first issues.</li>
+              </ul>
+              <div className="gs-empty-actions">
+                <Link to="/calibration" className="secondary-button">Add calibration data</Link>
+              </div>
+            </section>
+          )}
+
+        <div className="gs-dash-layout">
+        {view === "dashboard" && <DashboardSidebar />}
+        <div className="gs-dash-main">
+
+        {/* Demo workspace banner — read-only sample data. */}
+        {view === "dashboard" && isDemoMode() && (
+          <section className="gs-demo-banner">
+            <span><b>Demo workspace</b> · read-only sample data (Fastenal). Sign up to build your own.</span>
+            <Link to="/sign-up"><button className="primary-button">Get started</button></Link>
+          </section>
+        )}
+
+        {/* ── Primary toolbar (dashboard only; Risks is a read/review surface) ── */}
+        {view === "dashboard" && (
+        <>
         <section className="toolbar toolbar-primary">
-          <button
-            className="primary-button toolbar-run-btn"
-            onClick={handleRunIntelligenceUpdate}
-            disabled={busy !== null}
-          >
-            {busy === "pipeline"
-              ? `Updating Intelligence…`
-              : "Run Intelligence Update"}
-          </button>
+          {!isDemoMode() && (
+            <>
+              <button
+                className="primary-button toolbar-run-btn"
+                onClick={() => handleRunIntelligenceUpdate(false)}
+                disabled={busy !== null}
+              >
+                {busy === "pipeline"
+                  ? `Updating Intelligence…`
+                  : "Run Intelligence Update"}
+              </button>
 
-          <button
-            className="primary-button"
-            onClick={() => run("brief", () => generateBriefForCompany(company!.id))}
-            disabled={busy !== null}
-          >
-            {busy === "brief" ? "Generating…" : "Generate Executive Brief"}
-          </button>
+              <button
+                className="primary-button"
+                onClick={() => run("brief", () => generateBriefForCompany(company!.id))}
+                disabled={busy !== null}
+              >
+                {busy === "brief" ? "Generating…" : "Generate Executive Brief"}
+              </button>
+            </>
+          )}
 
-          <button
-            className="toolbar-stop-btn"
-            onClick={handleStopResetPipeline}
-            disabled={!pipelineState.running && busy !== "pipeline"}
-            title="Stop / Reset Pipeline"
-          >
-            ■ Stop / Reset
-          </button>
+          {!isDemoMode() && (!execMode || showAdvancedPipeline) && (
+            <button
+              className="toolbar-stop-btn"
+              onClick={handleStopResetPipeline}
+              disabled={!pipelineState.running && busy !== "pipeline"}
+              title="Stop / Reset Pipeline"
+            >
+              ■ Stop / Reset
+            </button>
+          )}
 
           <div className="toolbar-secondary-group">
-            <Link to="/onboarding">
-              <button className="secondary-button" disabled={busy !== null}>Add Company</button>
-            </Link>
             <Link to="/calibration">
               <button className="secondary-button" disabled={busy !== null}>Calibrate Model</button>
             </Link>
-            <Link to="/calibration">
-              <button className="secondary-button" disabled={busy !== null}>Approve Assumptions</button>
+            <Link to="/sources">
+              <button className="secondary-button" disabled={busy !== null}>Source Hub</button>
             </Link>
-            <button className="secondary-button" disabled>Export Memo</button>
+            <button className="secondary-button" disabled title="Generate an Executive Brief first to enable export">Export Memo</button>
+            {/* Internal/admin controls — hidden from the default executive view. */}
+            {!isDemoMode() && (!execMode || showAdvancedPipeline) && (
+              <>
+                <button
+                  className="secondary-button"
+                  onClick={() => handleRunIntelligenceUpdate(true)}
+                  disabled={busy !== null}
+                  title="Re-seed signals and force a full company-scoped run (bypasses no-change shortcuts)"
+                >
+                  Force full run
+                </button>
+                <Link to="/onboarding">
+                  <button className="secondary-button" disabled={busy !== null}>Add Company</button>
+                </Link>
+                <Link to="/calibration">
+                  <button className="secondary-button" disabled={busy !== null}>Approve Assumptions</button>
+                </Link>
+              </>
+            )}
           </div>
 
           <button
             className="text-button toolbar-advanced-toggle"
             onClick={() => setShowAdvancedPipeline((v) => !v)}
           >
-            {showAdvancedPipeline ? "▲ Hide advanced controls" : "▼ Advanced pipeline controls"}
+            {showAdvancedPipeline ? "▲ Hide advanced / admin controls" : "▼ Advanced / admin controls"}
           </button>
         </section>
 
+        {/* ── Structured start-failure + diagnostics ── */}
+        {startError && (
+          <section className="run-start-error-card">
+            <div className="run-start-error-head">
+              <span className="run-start-error-title">Could not start run</span>
+              <code className="run-start-error-code">{startError.errorCode}</code>
+              {startError.httpStatus != null && <span className="run-start-error-http">HTTP {startError.httpStatus}</span>}
+              {startError.stage && <span className="run-start-error-stage">stage: {startError.stage}</span>}
+              <button className="pipeline-dismiss-btn" onClick={() => { setStartError(null); setEdgeHealth(null); }} title="Dismiss">✕</button>
+            </div>
+            <p className="run-start-error-message">{startError.message}</p>
+            <p className="run-start-error-fix">{startError.suggestedFix ?? suggestedFix(startError.errorCode)}</p>
+            <div className="run-start-error-actions">
+              <button className="secondary-button" onClick={handleTestEdgeHealth} disabled={healthBusy}>
+                {healthBusy ? "Testing…" : "Test Edge Function health"}
+              </button>
+              <button className="primary-button" onClick={() => handleRunIntelligenceUpdate(false)} disabled={busy !== null}>Retry</button>
+              <button className="secondary-button" onClick={handleViewRunEvents}>Run diagnostics</button>
+            </div>
+            {edgeHealth && (
+              <div className={`edge-health edge-health-${edgeHealth.reachable ? (edgeHealth.ok ? "ok" : "warn") : "down"}`}>
+                <b>Healthcheck @ {edgeHealth.host}:</b>{" "}
+                {!edgeHealth.reachable
+                  ? `unreachable (${edgeHealth.error ?? "no response"}) — function not deployed or CORS/network blocked.`
+                  : edgeHealth.ok
+                    ? `ok · db_reachable=${String(edgeHealth.body?.db_reachable)} · run_schema_ready=${String(edgeHealth.body?.run_schema_ready)} · ${JSON.stringify(edgeHealth.body?.secrets_present ?? {})}`
+                    : `reachable but NOT ready (HTTP ${edgeHealth.httpStatus}) · run_schema_ready=${String(edgeHealth.body?.run_schema_ready)} · missing=${JSON.stringify(edgeHealth.body?.missing_columns ?? [])}`}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ── Run events drawer (diagnostics) ── */}
+        {runEvents && (
+          <section className="run-events-drawer">
+            <div className="run-events-head">
+              <span>Run events ({runEvents.length})</span>
+              <button className="pipeline-dismiss-btn" onClick={() => setRunEvents(null)} title="Close">✕</button>
+            </div>
+            <ol className="run-events-list">
+              {runEvents.length === 0 && <li className="run-event-empty">No events recorded for the latest run.</li>}
+              {runEvents.map((ev) => (
+                <li key={ev.id} className={`run-event run-event-${ev.level}`}>
+                  <span className="run-event-stage">{ev.stage}</span>
+                  <span className="run-event-msg">{ev.message}</span>
+                  <span className="run-event-time">{formatAgo(ev.created_at)}</span>
+                </li>
+              ))}
+            </ol>
+          </section>
+        )}
+
         {/* ── Pipeline progress card ── */}
-        {(pipelineState.running || pipelineState.completedAt !== null || pipelineState.error !== null) && (
+        {(pipelineState.running || pipelineState.completedAt !== null || (pipelineState.error !== null && !startError)) && (
           <section className="pipeline-progress-card">
             <div className="pipeline-progress-header">
               {pipelineState.running && (
@@ -1094,12 +1858,49 @@ function riskExposureSubtitle() {
               )}
               <button
                 className="pipeline-dismiss-btn"
-                onClick={() => setPipelineState(getInitialPipelineState())}
+                onClick={() => { setActiveRunSummaryId(null); setRunSnapshot(null); setPipelineState(getInitialPipelineState()); }}
                 title="Dismiss"
               >
                 ✕
               </button>
             </div>
+
+            {/* Live, DB-sourced run telemetry — survives tab close/refresh. */}
+            {runSnapshot && (
+              <div className="run-progress-meta">
+                <div className="run-progress-bar">
+                  <div
+                    className="run-progress-bar-fill"
+                    style={{ width: `${Math.max(0, Math.min(100, runSnapshot.progress_pct ?? 0))}%` }}
+                  />
+                </div>
+                <div className="run-progress-meta-row">
+                  <span className="run-progress-stage">
+                    {runSnapshot.current_stage_label ?? "Working…"}
+                    {runSnapshot.current_stage_index != null && runSnapshot.total_stages
+                      ? ` (${runSnapshot.current_stage_index}/${runSnapshot.total_stages})`
+                      : ""}
+                  </span>
+                  <span className={`run-progress-status run-progress-status-${runSnapshot.status}`}>
+                    {runSnapshot.status}
+                  </span>
+                  <span>{runSnapshot.run_mode ?? "full"}{runSnapshot.force ? " · force" : ""}</span>
+                  <span title="Server worker heartbeat">♥ {formatAgo(runSnapshot.heartbeat_at)}</span>
+                  <span>elapsed {formatElapsed(runSnapshot.started_at, runSnapshot.completed_at)}</span>
+                </div>
+                {runSnapshot.latestEvent && (
+                  <p className="run-progress-event">{runSnapshot.latestEvent.message}</p>
+                )}
+                <div className="run-progress-counters">
+                  {RUN_COUNTER_FIELDS.map(([key, label]) => (
+                    <span key={String(key)} className="run-counter">
+                      <b>{Number((runSnapshot as Record<string, unknown>)[key as string] ?? 0)}</b> {label}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <ol className="pipeline-steps-list">
               {pipelineState.steps.map((step) => (
                 <li key={step.id} className={`pipeline-step pipeline-step-${step.status}`}>
@@ -1126,6 +1927,24 @@ function riskExposureSubtitle() {
             <p className="toolbar-advanced-note">
               Advanced controls are for debugging individual pipeline stages. Most users should use <strong>Run Intelligence Update</strong>.
             </p>
+            {/* ── Ultra Debug / run diagnostics (server-owned) ── */}
+            <div className="ultra-debug-group">
+              <button className="secondary-button" onClick={handleTestEdgeHealth} disabled={healthBusy}>
+                {healthBusy ? "Testing…" : "Test Edge Function health"}
+              </button>
+              <button className="secondary-button" onClick={handleUltraDebugRun} disabled={busy !== null} title="Full server stages, capped queries/articles, server keys only">
+                Start ultra debug run
+              </button>
+              <button className="secondary-button" onClick={handleDryRun} disabled={busy !== null} title="Fetch + normalize + score only — no inserts/generation (quota-safe)">
+                Dry run
+              </button>
+              <button className="secondary-button" onClick={handleExpireStaleRuns} disabled={busy === "pipeline"} title="Expire stale server-heartbeat runs and release locks">
+                Expire stale runs
+              </button>
+              <button className="secondary-button" onClick={handleViewRunEvents}>
+                View run events
+              </button>
+            </div>
             <button
               className="secondary-button"
               onClick={() => run("fresh", () => fetchFreshIntelligenceForCompany(company!.id))}
@@ -1222,8 +2041,11 @@ function riskExposureSubtitle() {
             </button>
           </section>
         )}
+        </>
+        )}
 
-        <section className="metrics-grid">
+        {view === "dashboard" && (
+        <section className="metrics-grid" id="overview">
           <Metric
   title="Executive Issues"
   value={String(
@@ -1232,7 +2054,7 @@ function riskExposureSubtitle() {
       watchlistItems.length +
       publishedOpportunities.length
   )}
-  subtitle={`${riskItems.length} risks · ${operatingChanges.length} changes · ${watchlistItems.length} watch · ${publishedOpportunities.length} opportunities`}
+  subtitle={execMode ? canonicalIssueSubtitle : `${riskItems.length} risks · ${operatingChanges.length} changes · ${watchlistItems.length} watch · ${publishedOpportunities.length} opportunities`}
             explanation={explainDashboardMetric("executive_issues", {
   riskCount: riskItems.length,
   operatingChangeCount: operatingChanges.length,
@@ -1242,9 +2064,15 @@ function riskExposureSubtitle() {
           />
 
           <Metric
-  title="Risk Exposure"
-  value={`${formatMoney(totalRiskLow)}–${formatMoney(totalRiskHigh)}`}
-  subtitle={riskExposureSubtitle()}
+  title={execMode ? "Quantified Value at Stake" : "Risk Exposure"}
+  value={execMode ? formatExecutiveEstimate(execTotalRisk) : `${formatMoney(totalRiskLow)}–${formatMoney(totalRiskHigh)}`}
+  subtitle={
+    execMode
+      ? `${evidenceBackedRiskItems.length > 0
+          ? "Verified external metric · calibrated estimate"
+          : "Company-calibrated scenario estimate"}${execFreight ? ` · Freight ${execFreight.display}` : ""}${execTariff ? ` · Tariff ${execTariff.display}` : ""}`
+      : riskExposureSubtitle()
+  }
   explanation={explainDashboardMetric("risk_exposure", {
     low: totalRiskLow,
     high: totalRiskHigh,
@@ -1264,12 +2092,18 @@ function riskExposureSubtitle() {
 
           <Metric
             title="Candidate Upside"
-            value={`${formatMoney(totalOpportunityLow)}–${formatMoney(
-              totalOpportunityHigh
-            )}`}
+            value={
+              execMode
+                ? publishedOpportunities.length === 0
+                  ? "—"
+                  : formatExecutiveEstimate((totalOpportunityLow + totalOpportunityHigh) / 2)
+                : `${formatMoney(totalOpportunityLow)}–${formatMoney(totalOpportunityHigh)}`
+            }
             subtitle={
-              publishedOpportunities.length === 0 && blockedOpportunityCount > 0
-                ? `No quality-approved opportunity · ${blockedOpportunityCount} candidate${blockedOpportunityCount > 1 ? "s" : ""} blocked`
+              execMode && publishedOpportunities.length === 0
+                ? "Needs validation · no approved upside yet"
+                : candidateSummary.pendingReview > 0 || candidateSummary.quarantined > 0
+                ? candidateSummaryLine
                 : "Needs CRM/customer validation"
             }
             explanation={explainDashboardMetric("opportunity_upside", {
@@ -1296,17 +2130,37 @@ function riskExposureSubtitle() {
             title="Open Actions"
             value={String(openActions)}
             subtitle={actions.length > publishedActions.length
-              ? `${openActions} active · ${actions.length - publishedActions.length} blocked by quality gate`
-              : `${openActions} active`}
+              ? `${openActions} active action${openActions === 1 ? "" : "s"} · blocked candidates excluded`
+              : `${openActions} active action${openActions === 1 ? "" : "s"}`}
             explanation={explainDashboardMetric("open_actions", {
               open: openActions,
               total: publishedActions.length,
             })}
           />
+
+          <Metric
+            title="Calibration Coverage"
+            value={`${calibrationCoverage}%`}
+            subtitle={`${calibrationController.workbench.summary.inputsCalibrated} of ${calibrationController.workbench.summary.inputsRequired} required inputs calibrated`}
+            explanation={{
+              title: "Calibration Coverage",
+              displayedValue: `${calibrationCoverage}%`,
+              formula: "Weighted reliability across freight, supplier, CRM, financial, inventory, competitive, and outcome calibration domains.",
+              inputs: [
+                { label: "Imported data sources", value: String(calibrationController.workbench.summary.importedDataSources) },
+                { label: "Inferred assumptions remaining", value: String(calibrationController.workbench.summary.inferredAssumptions) },
+                { label: "Estimates improved by data", value: String(calibrationController.workbench.summary.estimatesImproved) },
+              ],
+              source: "Calibration Center workbench — company-provided freight, supplier, CRM, financial, and outcome data.",
+              note: "Higher coverage means fewer inferred assumptions and tighter, more defensible exposure estimates. Upload data in the Calibration Center to raise this score.",
+            }}
+          />
         </section>
+        )}
 
         {/* 2. Leadership Memo — compact structured preview */}
-        <CompactMemoSection
+        {view === "dashboard" && (
+        <div id="brief"><CompactMemoSection
           brief={brief}
           company={company}
           riskItems={riskItems}
@@ -1322,33 +2176,89 @@ function riskExposureSubtitle() {
           quarantineCount={candidateQueueItems.filter(i => i.gateResult.decision === "quarantine").length}
           reviewCount={candidateQueueItems.filter(i => i.gateResult.decision === "candidate_review").length}
           totalGeneratedCount={opportunities.length + risks.length}
-        />
+          execMode={execMode}
+          execTotalRisk={execTotalRisk}
+          actions={publishedActions}
+          execByIssueId={execByIssueId}
+        /></div>
+        )}
 
-        {/* 3. Executive Actions + ROI */}
-        <ActionRoiPanel actions={actionRoiItems} onStatusChange={updateActionStatus} />
+        {/* 3. Company Exposure Graph — directly after the brief */}
+        {view === "dashboard" && (
+          <section className="card" id="exposure">
+            <div className="card-header">
+              <div>
+                <p className="eyebrow">Exposure graph</p>
+                <h2 className="section-title">Company Exposure Graph</h2>
+                <p className="dashboard-subtitle" style={{ marginTop: 4, marginBottom: 0 }}>
+                  External signal → company exposure → calculation → business impact → action.
+                </p>
+              </div>
+            </div>
+            <CompanyExposureGraph
+              model={exposureGraphModel}
+              auditContent={
+                impactPaths.length > 0 || edges.length > 0 ? (
+                  <GroupedExposurePaths paths={impactPaths} edges={edges} />
+                ) : undefined
+              }
+            />
+          </section>
+        )}
 
-        {/* 4. Driver Priority Map */}
-        {driverPriorityReport.drivers.length > 0 && (
+        {/* 4. Executive Actions + ROI */}
+        {view === "dashboard" && (
+          <div id="actions"><ActionRoiPanel actions={actionRoiItems} onStatusChange={updateActionStatus} execMode={execMode} /></div>
+        )}
+
+        {/* 4b. Driver Priority Map — compact, below the graph */}
+        {view === "dashboard" && driverPriorityReport.drivers.length > 0 && (
           <DriverPriorityMap
             drivers={driverPriorityReport.drivers}
             topDriver={driverPriorityReport.topDriver}
             watchCount={driverPriorityReport.watchCount}
             publishedIssueCount={riskItems.length + operatingChanges.length}
+            execMode={execMode}
+            execImpactByTitle={execImpactByTitle}
           />
         )}
 
-        {/* 4b. Candidate Review Queue — items blocked by quality gate */}
-        <CandidateReviewQueue items={candidateQueueItems} />
+        {/* Dashboard: compact Issue Register preview — full register lives on /risks */}
+        {view === "dashboard" && (
+          <section className="card" id="register">
+            <div className="card-header">
+              <div>
+                <h2 className="section-title">Issue Register</h2>
+              </div>
+              <Link to="/risks"><button className="secondary-button">Open Risks →</button></Link>
+            </div>
+            <p className="dashboard-subtitle" style={{ marginTop: 0 }}>
+              {pluralize(riskItems.length + operatingChanges.length, "published item")} · {formatExecutiveEstimate(execTotalRisk)} total value at stake · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
+            </p>
+            <ul className="gs-register-preview">
+              {[...riskItems, ...operatingChanges].slice(0, 5).map((risk) => (
+                <li key={risk.id} className="gs-register-preview-row">
+                  <span className="gs-register-preview-title">{risk.risk_title}</span>
+                  <span className="badge">{isTariffIssue(risk) ? "Operating Change" : "Risk"}</span>
+                  <span className="gs-register-preview-val">{execByIssueId.get(risk.id)?.display ?? "Needs validation"}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
 
-        {/* 4. Risk Register */}
+        {/* 4b. Candidate Review Queue — items blocked by quality gate (Risks page) */}
+        {view === "risks" && <CandidateReviewQueue items={candidateQueueItems} />}
+
+        {/* 4. Risk Register (full — Risks page) */}
+        {view === "risks" && (
         <section className="card">
           <div className="card-header">
             <div>
-              <p className="eyebrow">System of record</p>
               <h2 className="section-title">Risk Register</h2>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="badge">{riskItems.length} risks · {formatMoney(totalRiskLow)}–{formatMoney(totalRiskHigh)}</span>
+              <span className="badge">{execMode ? `${pluralize(riskItems.length, "risk")} · ${formatExecutiveEstimate(execRiskSectionTotal)}` : `${riskItems.length} risks · ${formatMoney(totalRiskLow)}–${formatMoney(totalRiskHigh)}`}</span>
               {riskItems.length > 0 && (
                 <button className="text-button" onClick={() => toggleAllRiskSection(riskItems.map(r => r.id))}>
                   {riskItems.every(r => expandedRiskIds.has(r.id)) ? "Collapse all" : "Expand all"}
@@ -1373,7 +2283,29 @@ function riskExposureSubtitle() {
                   onToggle={() => toggleRiskId(risk.id)}
                   movement={getMovement(risk.risk_title, riskSnapshots, "risk_title")}
                   matchedConnections={matchedConnectionsByItemId[risk.id] || []}
-                  calibration={calibration}
+                  calibration={effectiveCalibration}
+                  calibratedKeys={calibratedKeys}
+                  calibratedOverlay={
+                    isFreightIssue(risk)
+                      ? freightCalibrated
+                      : isTariffIssue(risk) || risk.issue_category?.includes("commodity")
+                      ? steelCalibrated
+                      : null
+                  }
+                  provenance={buildIssueProvenance(
+                    {
+                      title: risk.risk_title,
+                      category: risk.issue_category,
+                      hasCalibratedOverlay: isFreightIssue(risk)
+                        ? !!freightCalibrated
+                        : isTariffIssue(risk) || risk.issue_category?.includes("commodity")
+                        ? !!steelCalibrated
+                        : false,
+                    },
+                    verifiedShocks
+                  )}
+                  execMode={execMode}
+                  execEstimate={execByIssueId.get(risk.id) ?? null}
                   gateResult={_gateResults.get(risk.id)}
                   ownerFromAction={ownerFromAction}
                 />
@@ -1381,16 +2313,21 @@ function riskExposureSubtitle() {
             })
           )}
         </section>
+        )}
 
-        {/* 5. Opportunities */}
-        <section className="card">
+        {/* 5. Opportunity Pipeline (dashboard — one coherent section) */}
+        {view === "dashboard" && (
+        <section className="card" id="opportunities">
           <div className="card-header">
             <div>
               <p className="eyebrow">Commercial upside</p>
-              <h2 className="section-title">Opportunities</h2>
+              <h2 className="section-title">Opportunity Pipeline</h2>
+              <p className="dashboard-subtitle" style={{ marginTop: 4, marginBottom: 0 }}>
+                {candidateSummaryLine}
+              </p>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <span className="badge">{publishedOpportunities.length} opportunities</span>
+              <span className="badge">{candidateSummary.approved} approved</span>
               {publishedOpportunities.length > 0 && (
                 <button className="text-button" onClick={() => toggleAllOpportunitySection(publishedOpportunities.map(o => o.id))}>
                   {publishedOpportunities.every(o => expandedOpportunityIds.has(o.id)) ? "Collapse all" : "Expand all"}
@@ -1400,11 +2337,19 @@ function riskExposureSubtitle() {
           </div>
           {publishedOpportunities.length === 0 ? (
             <div>
-              <p className="muted">No approved opportunities this cycle.</p>
-              {candidateQueueItems.filter(i => i.type === "opportunity").length > 0 && (
-                <p className="muted" style={{ marginTop: 6, fontSize: 12 }}>
-                  {candidateQueueItems.filter(i => i.type === "opportunity").length} candidate{candidateQueueItems.filter(i => i.type === "opportunity").length > 1 ? "s" : ""} require{candidateQueueItems.filter(i => i.type === "opportunity").length === 1 ? "s" : ""} review — see Candidate Review Queue below.
-                </p>
+              <p className="muted">No approved opportunities this cycle. Candidates below remain in review until company-specific capture evidence is provided.</p>
+              {candidateQueueItems.length > 0 && (
+                <ul className="gs-register-preview" style={{ marginTop: 8 }}>
+                  {candidateQueueItems.map((c) => (
+                    <li key={c.id} className="gs-register-preview-row">
+                      <span className="gs-register-preview-title">{c.title}</span>
+                      <span className="badge">{c.gateResult.decision === "quarantine" ? "Quarantined" : "Pending review"}</span>
+                      <span className="gs-register-preview-val" style={{ color: "var(--text-muted)", whiteSpace: "normal" }}>
+                        {c.gateResult.requiredToPromote?.[0] ?? "Needs company-specific capture evidence."}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
               )}
             </div>
           ) : (
@@ -1420,17 +2365,17 @@ function riskExposureSubtitle() {
             ))
           )}
         </section>
+        )}
 
-        {/* 6. Operating Changes */}
-        {operatingChanges.length > 0 && (
+        {/* 6. Operating Changes (Risks page) */}
+        {view === "risks" && operatingChanges.length > 0 && (
           <section className="card">
             <div className="card-header">
               <div>
-                <p className="eyebrow">Policy / operating changes</p>
                 <h2 className="section-title">Operating Changes</h2>
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <span className="badge">{operatingChanges.length} items</span>
+                <span className="badge">{execMode ? `${pluralize(operatingChanges.length, "item")} · ${formatExecutiveEstimate(execChangeSectionTotal)}` : `${operatingChanges.length} items`}</span>
                 <button className="text-button" onClick={() => toggleAllRiskSection(operatingChanges.map(r => r.id))}>
                   {operatingChanges.every(r => expandedRiskIds.has(r.id)) ? "Collapse all" : "Expand all"}
                 </button>
@@ -1443,17 +2388,18 @@ function riskExposureSubtitle() {
                 expanded={expandedRiskIds.has(item.id)}
                 onToggle={() => toggleRiskId(item.id)}
                 matchedConnections={matchedConnectionsByItemId[item.id] || []}
+                execMode={execMode}
+                execEstimate={execByIssueId.get(item.id) ?? null}
               />
             ))}
           </section>
         )}
 
-        {/* 7. Watchlist */}
-        {watchlistItems.length > 0 && (
+        {/* 7. Watchlist (Risks page) */}
+        {view === "risks" && watchlistItems.length > 0 && (
           <section className="card">
             <div className="card-header">
               <div>
-                <p className="eyebrow">Monitor</p>
                 <h2 className="section-title">Watchlist</h2>
               </div>
               <span className="badge">{watchlistItems.length} items</span>
@@ -1470,40 +2416,38 @@ function riskExposureSubtitle() {
           </section>
         )}
 
-        {/* 8. Operating Model Completeness */}
-        <OperatingModelCompleteness
-          sections={modelCompletenessReport.sections}
-          overallCompleteness={modelCompletenessReport.overallCompleteness}
-        />
+        {/* 6–9. Compact calibration / source / outcome summaries (dashboard) */}
+        {view === "dashboard" && (
+        <>
+          <div id="support">
+            {/* Calibration Summary — compact status; full workbench lives at /calibration */}
+            <CalibrationSummaryCard controller={calibrationController} />
 
-        {/* 9. Forecast Accuracy / Outcome Tracking */}
-        <ForecastAccuracyPanel rows={forecastRows} />
-
-        {/* 9. Company Model — compact with expandable sections */}
-        <CompanyModelSection company={company} entities={entities} getEntities={getEntities} />
-
-        {/* 9. Company Exposure Graph */}
-        <section className="card">
-          <div className="card-header">
-            <div>
-              <p className="eyebrow">Exposure graph</p>
-              <h2 className="section-title">Company Exposure Graph</h2>
-              <p className="dashboard-subtitle" style={{ marginTop: 4, marginBottom: 0 }}>
-                Proprietary operating map connecting external drivers to Fastenal financial outcomes.
-              </p>
-            </div>
+            {/* Source Coverage — free/public external data powering verified shocks */}
+            <SourceCoverageCard companyId={company?.id ?? null} />
           </div>
-          <CompanyExposureGraph
-            impactPaths={impactPaths}
-            edges={edges}
-            freightRiskLow={freightRiskLow}
-            freightRiskHigh={freightRiskHigh}
-            publishedOpportunities={publishedOpportunities}
-            blockedOpportunityCandidates={blockedOpportunityCount}
-          />
-        </section>
 
-        {/* Raw events — advanced/developer view */}
+          <div id="outcomes">
+            {/* Forecast Accuracy / Outcome Tracking */}
+            <ForecastAccuracyPanel rows={forecastRows} execMode={execMode} />
+
+            {/* Company Model — compact with expandable sections */}
+            <CompanyModelSection company={company} entities={entities} getEntities={getEntities} />
+          </div>
+
+          {/* Automatic intelligence updates — schedule status + run history */}
+          <SchedulerStatusCard
+            companyId={company?.id ?? null}
+            onRunNow={handleRunIntelligenceUpdate}
+            running={busy === "pipeline" || pipelineState.running}
+            refreshKey={schedulerRefresh}
+            canWrite={!isDemoMode()}
+          />
+        </>
+        )}
+
+        {/* Raw events — advanced/developer view (hidden until Advanced controls are expanded) */}
+        {view === "dashboard" && showAdvancedPipeline && (
         <section className="card">
           <button className="secondary-button" onClick={() => setShowRawEvents(!showRawEvents)}>
             {showRawEvents ? "Hide Raw Events" : "Show Raw Events"}
@@ -1526,9 +2470,126 @@ function riskExposureSubtitle() {
             </div>
           )}
         </section>
+        )}
+
+        {/* Risks page: quality-gate summary footer */}
+        {view === "risks" && (
+          <section className="card">
+            <div className="card-header">
+              <div>
+                <h2 className="section-title">Quality Gate</h2>
+              </div>
+              <span className="badge">{candidateQueueItems.length} in review</span>
+            </div>
+            <p className="dashboard-subtitle" style={{ marginTop: 0 }}>
+              {riskItems.length + operatingChanges.length} published · {candidateQueueItems.filter(i => i.gateResult.decision === "candidate_review").length} pending review · {candidateQueueItems.filter(i => i.gateResult.decision === "quarantine").length} quarantined. Blocked candidates are excluded from executive estimates, actions, and forecasts until promoted.
+            </p>
+          </section>
+        )}
+
+        {/* Risks page: full intelligence run history (manual + scheduled) */}
+        {view === "risks" && (
+          <section className="card">
+            <div className="card-header">
+              <div>
+                <h2 className="section-title">Intelligence Run History</h2>
+                <p className="dashboard-subtitle" style={{ marginTop: 4, marginBottom: 0 }}>
+                  Every manual and scheduled intelligence update, with counts and outcomes.
+                </p>
+              </div>
+            </div>
+            <RunHistoryPanel companyId={company?.id ?? null} limit={25} refreshKey={schedulerRefresh} />
+          </section>
+        )}
+        </div>
+        </div>
       </div>
     </main>
   );
+}
+
+// Executive memo lines — derived from the company's ACTUAL published issues and
+// actions (not a canonical freight/tariff template), so the brief always matches
+// the published risk register and its owner/action. Point estimates, no ranges
+// when an executive estimate exists.
+function buildExecMemoLines(opts: {
+  execTotalRisk: number;
+  riskItems: Risk[];
+  operatingChanges: Risk[];
+  watchlistItems: Risk[];
+  actions: ActionItem[];
+  execByIssueId: Map<string, ExecutiveEstimate>;
+  companyName: string;
+}): { prefix: string; className: string; text: string }[] {
+  const { execTotalRisk, riskItems, operatingChanges, watchlistItems, actions, execByIssueId, companyName } = opts;
+  if (riskItems.length === 0 && operatingChanges.length === 0) return [];
+
+  const co = companyName || "your company";
+  const issueValue = (r: Risk): string => {
+    const est = execByIssueId.get(r.id);
+    if (est && est.value !== null) return est.display.replace("~", "");
+    const lo = Number(r.impact_low || 0);
+    const hi = Number(r.impact_high || 0);
+    return lo || hi
+      ? `${formatExecutiveEstimate(lo).replace("~", "")}–${formatExecutiveEstimate(hi).replace("~", "")}`
+      : "an amount pending validation";
+  };
+  const actionFor = (r: Risk) => actions.find((a) => a.risk_id === r.id) ?? null;
+
+  const total = formatExecutiveEstimate(execTotalRisk).replace("~", "");
+  const activeCount = riskItems.length + operatingChanges.length;
+  const lines: { prefix: string; className: string; text: string }[] = [];
+
+  lines.push({
+    prefix: "SUMMARY",
+    className: "memo-act",
+    text: `GroundSense found approximately ${total} of quantified value at stake for ${co} across ${activeCount} active operating issue${activeCount === 1 ? "" : "s"}, tied to verified external signals and company-specific exposure.`,
+  });
+
+  // ACT NOW — top published risk (Act-triaged first, then largest impact).
+  const topRisk = [...riskItems].sort((a, b) => {
+    const aw = getTriageBadge(a).label === "Act" ? 1 : 0;
+    const bw = getTriageBadge(b).label === "Act" ? 1 : 0;
+    if (aw !== bw) return bw - aw;
+    return Number(b.impact_high || 0) - Number(a.impact_high || 0);
+  })[0] ?? null;
+  if (topRisk) {
+    const evidence = getIssueModelStatus(topRisk.methodology).status === "evidence_backed"
+      ? "Evidence-backed" : "Scenario-modeled";
+    const act = actionFor(topRisk);
+    lines.push({
+      prefix: `1. ACT NOW — ${topRisk.risk_title}`,
+      className: "memo-act",
+      text: `${evidence} exposure of approximately ${issueValue(topRisk)}.${act ? ` Owner action: ${act.owner || "assign an owner"} to ${(act.title || "validate the exposure").replace(/\.$/, "")}.` : " Assign an owner and a validation action."}`,
+    });
+  }
+
+  // VALIDATE — top operating change.
+  const topChange = operatingChanges[0] ?? null;
+  if (topChange) {
+    const act = actionFor(topChange);
+    lines.push({
+      prefix: `2. VALIDATE — ${topChange.risk_title}`,
+      className: "memo-validate",
+      text: `Operating change with approximately ${issueValue(topChange)} pending validation.${act ? ` Owner: ${act.owner || "unassigned"}.` : ""}`,
+    });
+  }
+
+  // WATCH — monitored, not dollarized.
+  if (watchlistItems.length > 0) {
+    lines.push({
+      prefix: "3. WATCH",
+      className: "memo-validate",
+      text: `${watchlistItems.length} item${watchlistItems.length === 1 ? "" : "s"} on watch — monitored without a dollar estimate until evidence supports sizing.`,
+    });
+  }
+
+  lines.push({
+    prefix: "MODEL BASIS",
+    className: "memo-caveat",
+    text: "Estimates derive from verified external metrics and company calibration. Scenario-modeled issues are labeled and require company-specific validation before realization.",
+  });
+  return lines;
 }
 
 function CompactMemoSection({
@@ -1547,6 +2608,10 @@ function CompactMemoSection({
   quarantineCount = 0,
   reviewCount = 0,
   totalGeneratedCount = 0,
+  execMode = false,
+  execTotalRisk = 0,
+  actions = [],
+  execByIssueId = new Map<string, ExecutiveEstimate>(),
 }: {
   brief: Brief | null;
   company: Company | null;
@@ -1563,10 +2628,25 @@ function CompactMemoSection({
   quarantineCount?: number;
   reviewCount?: number;
   totalGeneratedCount?: number;
+  execMode?: boolean;
+  execTotalRisk?: number;
+  actions?: ActionItem[];
+  execByIssueId?: Map<string, ExecutiveEstimate>;
 }) {
   const [briefExpanded, setBriefExpanded] = useState(false);
 
-  const memoStructure = getMemoLine({
+  // Executive memo lines — derived from this company's actual published rows.
+  const execMemoLines = buildExecMemoLines({
+    execTotalRisk,
+    riskItems,
+    operatingChanges,
+    watchlistItems,
+    actions,
+    execByIssueId,
+    companyName: company?.name ?? "",
+  });
+
+  const memoStructure = execMode && execMemoLines.length > 0 ? execMemoLines : getMemoLine({
     actNowRisks: riskItems.filter(r => getTriageBadge(r).label === "Act"),
     validateRisks: riskItems.filter(r => getTriageBadge(r).label === "Validate"),
     topOpp: opportunities[0] || null,
@@ -1587,7 +2667,6 @@ function CompactMemoSection({
     <section className="card memo-section">
       <div className="card-header">
         <div>
-          <p className="eyebrow">Leadership memo</p>
           <h2 className="section-title">{brief?.title || "Intelligence Summary"}</h2>
         </div>
         {brief ? (
@@ -1637,7 +2716,7 @@ function CompactMemoSection({
               </div>
             ))}
             <div className="memo-expanded-line memo-caveat">
-              <span className="memo-expanded-prefix">6. QUALITY GATE</span>
+              <span className="memo-expanded-prefix">QUALITY GATE</span>
               <p className="memo-expanded-body">
                 GroundSense reviewed {totalGeneratedCount} generated candidate{totalGeneratedCount !== 1 ? "s" : ""}.{" "}
                 {totalGeneratedCount - candidateQueueCount} were published to this brief
@@ -1654,7 +2733,7 @@ function CompactMemoSection({
               </p>
             </div>
             <div className="memo-expanded-line memo-caveat">
-              <span className="memo-expanded-prefix">7. LEARNING LOOP</span>
+              <span className="memo-expanded-prefix">LEARNING LOOP</span>
               <p className="memo-expanded-body">Forecast records are open for quality-approved issues only. Realized outcomes will calibrate future company-specific exposure models.</p>
             </div>
           </div>
@@ -1677,7 +2756,6 @@ function CompanyModelSection({
     <section className="card company-model-compact">
       <div className="company-compact-header">
         <div className="company-compact-profile">
-          <p className="eyebrow">Company model</p>
           <h2 className="company-compact-name">{company?.name || "No company"}</h2>
           <div className="company-compact-meta">
             <span className="company-compact-industry">{company?.industry || "Industry not set"}</span>
@@ -1849,207 +2927,59 @@ function GroupedExposurePaths({
   );
 }
 
-function CompanyExposureGraph({
-  impactPaths,
-  edges,
-  freightRiskLow,
-  freightRiskHigh,
-  publishedOpportunities,
-  blockedOpportunityCandidates,
-}: {
-  impactPaths: ImpactPath[];
-  edges: ExposureEdge[];
-  freightRiskLow: number;
-  freightRiskHigh: number;
-  publishedOpportunities: Opportunity[];
-  blockedOpportunityCandidates: number;
-}) {
-  const [showRaw, setShowRaw] = useState(false);
-
-  return (
-    <div className="gs-exposure-graph">
-      <style>{`
-        .gs-exposure-graph { font-family: Inter, ui-sans-serif, system-ui, sans-serif; color: #2b2118; }
-        .gs-eg-section { margin-bottom: 20px; }
-        .gs-eg-section-title {
-          font-size: 11px; font-weight: 700; text-transform: uppercase;
-          letter-spacing: 0.07em; color: #7a6a5d; margin: 0 0 10px;
-        }
-        .gs-eg-path {
-          border: 1px solid #e7dccd; border-radius: 10px; padding: 12px 14px;
-          margin-bottom: 8px; background: #fefcf8;
-        }
-        .gs-eg-path-chain {
-          font-size: 14px; font-weight: 620; color: #2b2118; line-height: 1.4;
-          margin: 0 0 6px;
-        }
-        .gs-eg-path-meta {
-          display: flex; gap: 12px; flex-wrap: wrap; align-items: center;
-          font-size: 12px; color: #7a6a5d; margin-bottom: 4px;
-        }
-        .gs-eg-status-badge {
-          display: inline-block; font-size: 11px; font-weight: 650;
-          padding: 2px 7px; border-radius: 4px; white-space: nowrap;
-        }
-        .gs-eg-status-active { background: #fff0e6; color: #7a3a0a; }
-        .gs-eg-status-validate { background: #f0f4ff; color: #2a3a8a; }
-        .gs-eg-status-watch { background: #f4f4f4; color: #5c5c5c; }
-        .gs-eg-status-candidate { background: #f0faf4; color: #2b6b3a; }
-        .gs-eg-missing {
-          font-size: 11px; color: #9a8070; font-style: italic; margin-top: 3px;
-        }
-        .gs-eg-raw-toggle {
-          font-size: 12px; color: #9a8070; cursor: pointer; background: none;
-          border: none; padding: 4px 0; text-decoration: underline;
-        }
-        .gs-eg-sensitivity {
-          display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
-          margin-top: 8px;
-        }
-        .gs-eg-sensitivity-item {
-          background: #f7f1e8; border-radius: 8px; padding: 8px 10px;
-          font-size: 12px; color: #5c4e3a;
-        }
-        .gs-eg-sensitivity-label { font-weight: 650; display: block; margin-bottom: 2px; }
-      `}</style>
-
-      {/* 1. Active exposure paths */}
-      <div className="gs-eg-section">
-        <p className="gs-eg-section-title">Active exposure paths</p>
-
-        <div className="gs-eg-path">
-          <p className="gs-eg-path-chain">Freight → Logistics cost → Manufacturing fulfillment → Gross margin</p>
-          <div className="gs-eg-path-meta">
-            <span className="gs-eg-status-badge gs-eg-status-active">Active scenario downside</span>
-            <span>{formatMoney(freightRiskLow)}–{formatMoney(freightRiskHigh)} scenario range</span>
-          </div>
-          <p className="gs-eg-missing">Missing links: lane-level spend, contract coverage by lane, surcharge exposure</p>
-        </div>
-
-        <div className="gs-eg-path">
-          <p className="gs-eg-path-chain">Steel / tariff policy → Landed cost → Product margin → Gross margin</p>
-          <div className="gs-eg-path-meta">
-            <span className="gs-eg-status-badge gs-eg-status-validate">Validate operating change</span>
-            <span>$525K residual exposure · $350K potential relief</span>
-          </div>
-          <p className="gs-eg-missing">Missing links: supplier country-of-origin, SKU landed cost, open PO exposure</p>
-        </div>
-      </div>
-
-      {/* 2. Candidate opportunity paths */}
-      <div className="gs-eg-section">
-        <p className="gs-eg-section-title">Candidate opportunity paths</p>
-        {publishedOpportunities.length > 0 ? (
-          publishedOpportunities.map(o => (
-            <div key={o.id} className="gs-eg-path">
-              <p className="gs-eg-path-chain">{(o.exposure_path || []).join(" → ") || "Demand → Revenue / gross margin"}</p>
-              <div className="gs-eg-path-meta">
-                <span className="gs-eg-status-badge gs-eg-status-candidate">Needs validation</span>
-                <span>{formatMoney(o.revenue_low)}–{formatMoney(o.revenue_high)} candidate upside</span>
-              </div>
-              <p className="gs-eg-missing">Missing links: CRM pipeline by account, quote volume trend, customer order growth</p>
-            </div>
-          ))
-        ) : (
-          <div className="gs-eg-path">
-            <p className="gs-eg-path-chain" style={{ color: "#9a8070", fontStyle: "italic" }}>No approved opportunity path this cycle.</p>
-            {blockedOpportunityCandidates > 0 && (
-              <p className="gs-eg-missing">
-                {blockedOpportunityCandidates} opportunity candidate{blockedOpportunityCandidates > 1 ? "s" : ""} blocked by quality gate — see Candidate Review Queue.
-              </p>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* 3. Watch paths */}
-      <div className="gs-eg-section">
-        <p className="gs-eg-section-title">Watch paths</p>
-        <div className="gs-eg-path">
-          <p className="gs-eg-path-chain">Grainger / MSC / Applied → Competitive pressure → Manufacturing accounts → Revenue retention</p>
-          <div className="gs-eg-path-meta">
-            <span className="gs-eg-status-badge gs-eg-status-watch">Watch</span>
-            <span>Revenue base potentially influenced — not modeled loss</span>
-          </div>
-          <p className="gs-eg-missing">Missing links: win/loss data, pricing changes, account displacement signals</p>
-        </div>
-      </div>
-
-      {/* 4. Sensitivity */}
-      <div className="gs-eg-section">
-        <p className="gs-eg-section-title">Sensitivity</p>
-        <div className="gs-eg-sensitivity">
-          <div className="gs-eg-sensitivity-item">
-            <span className="gs-eg-sensitivity-label">Steel +1% move</span>
-            Margin sensitivity: ~$1.5M unpassed exposure
-          </div>
-          <div className="gs-eg-sensitivity-item">
-            <span className="gs-eg-sensitivity-label">Freight +1% move</span>
-            Logistics sensitivity: ~$252K on spot-exposed spend
-          </div>
-          <div className="gs-eg-sensitivity-item">
-            <span className="gs-eg-sensitivity-label">Backorder rate +1pt</span>
-            Revenue leakage: sensitive to fill-rate SLA breach
-          </div>
-        </div>
-      </div>
-
-      {/* View all raw paths toggle */}
-      {(impactPaths.length > 0 || edges.length > 0) && (
-        <>
-          <button className="gs-eg-raw-toggle" onClick={() => setShowRaw(v => !v)}>
-            {showRaw ? "Hide raw paths" : `View all raw paths (${impactPaths.length > 0 ? impactPaths.length : edges.length})`}
-          </button>
-          {showRaw && (
-            <GroupedExposurePaths paths={impactPaths} edges={edges} />
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
 function QualityGateReport({ gateResult }: { gateResult: IssueGateResult }) {
   const [open, setOpen] = useState(false);
   const score = gateResult.qualityScore;
-  const scoreColor = score >= 60 ? "#2b6b3a" : score >= 35 ? "#7a5c2b" : "#8a3a1a";
+  const qualityLabel = score >= 70 ? "High" : score >= 45 ? "Medium" : "Low";
+  const labelColor = score >= 70 ? "var(--success)" : score >= 45 ? "var(--warning)" : "var(--danger)";
+  const why = gateResult.forecastEligible
+    ? "verified external source + company exposure + actionability"
+    : "evidence aligned and company-relevant; forecast pending validation";
   return (
-    <div style={{ borderTop: "1px solid #e7dccd", marginTop: 12, paddingTop: 10 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10, cursor: "pointer" }} onClick={() => setOpen(v => !v)}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: "#7a6a5d", textTransform: "uppercase", letterSpacing: "0.06em" }}>Quality Gate Report</span>
-        <span style={{ fontSize: 11, background: "#e8f5ec", color: "#2b6b3a", fontWeight: 650, padding: "1px 7px", borderRadius: 4 }}>Published ✓</span>
-        <span style={{ fontSize: 12, color: scoreColor, marginLeft: "auto" }}>Quality {score}/100</span>
-        <button className="text-button" style={{ fontSize: 12 }}>{open ? "Collapse ▲" : "Show ▼"}</button>
+    <div style={{ borderTop: "1px solid var(--border-default)", marginTop: 12, paddingTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Quality Gate</span>
+        <span style={{ fontSize: 11, background: "var(--success-bg)", color: "var(--success)", fontWeight: 650, padding: "1px 7px", borderRadius: 4 }}>Published ✓</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: labelColor }}>Quality: {qualityLabel}</span>
+        <button className="text-button" style={{ fontSize: 12, marginLeft: "auto" }} onClick={() => setOpen(v => !v)}>
+          {open ? "Hide quality details" : "Show quality details"}
+        </button>
       </div>
+      <p style={{ fontSize: 12, color: "var(--text-secondary)", margin: "5px 0 0" }}>
+        <span style={{ fontWeight: 650, color: "var(--text-muted)" }}>Why: </span>{why}
+      </p>
       {open && (
         <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
           {[
             { label: "Evidence alignment", value: gateResult.evidenceAlignmentScore },
             { label: "Company relevance", value: gateResult.companyRelevanceScore },
-            { label: "Overall quality", value: gateResult.qualityScore },
+            { label: "Overall quality (weighted)", value: gateResult.qualityScore },
           ].map(({ label, value }) => {
-            const c = value >= 60 ? "#22c55e" : value >= 35 ? "#f59e0b" : "#ef4444";
+            const c = value >= 60 ? "var(--success)" : value >= 35 ? "var(--warning)" : "var(--danger)";
             return (
               <div key={label} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
-                <span style={{ color: "#7a6a5d", width: 140, flexShrink: 0 }}>{label}</span>
-                <div style={{ flex: 1, height: 6, background: "#e7dccd", borderRadius: 3, maxWidth: 120 }}>
+                <span style={{ color: "var(--text-muted)", width: 140, flexShrink: 0 }}>{label}</span>
+                <div style={{ flex: 1, height: 6, background: "var(--border-default)", borderRadius: 3, maxWidth: 120 }}>
                   <div style={{ width: `${value}%`, height: "100%", background: c, borderRadius: 3 }} />
                 </div>
-                <span style={{ color: "#5c4e3a", fontWeight: 600 }}>{value}%</span>
+                <span style={{ color: "var(--text-secondary)", fontWeight: 600 }}>{value}%</span>
               </div>
             );
           })}
-          <div style={{ fontSize: 12, color: "#5c4e3a", marginTop: 4 }}>
-            <span style={{ fontWeight: 650, color: "#7a6a5d" }}>Forecast eligible: </span>
+          <div style={{ fontSize: 11, color: "var(--text-muted)", fontStyle: "italic", marginTop: 2 }}>
+            Overall quality is a weighted score (evidence alignment, company relevance, source credibility, external-shock verification, and actionability) — not the average of alignment and relevance.
+          </div>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)", marginTop: 4 }}>
+            <span style={{ fontWeight: 650, color: "var(--text-muted)" }}>Forecast eligible: </span>
             {gateResult.forecastEligible ? "Yes" : "No — requires calibration or validation"}
           </div>
-          <div style={{ fontSize: 12, color: "#5c4e3a" }}>
-            <span style={{ fontWeight: 650, color: "#7a6a5d" }}>Evidence reviewed: </span>
+          <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+            <span style={{ fontWeight: 650, color: "var(--text-muted)" }}>Evidence reviewed: </span>
             {gateResult.evidenceCount} items · {gateResult.alignedCount} aligned · {gateResult.irrelevantCount} unrelated
           </div>
           {gateResult.requiredToPromote.length > 0 && (
-            <div style={{ fontSize: 12, color: "#5c4e3a" }}>
-              <span style={{ fontWeight: 650, color: "#7a6a5d" }}>What would improve: </span>
+            <div style={{ fontSize: 12, color: "var(--text-secondary)" }}>
+              <span style={{ fontWeight: 650, color: "var(--text-muted)" }}>What would improve: </span>
               {gateResult.requiredToPromote[0]}
             </div>
           )}
@@ -2067,6 +2997,11 @@ function RiskCard({
   movement,
   matchedConnections,
   calibration,
+  calibratedKeys,
+  calibratedOverlay,
+  provenance,
+  execMode,
+  execEstimate,
   gateResult,
   ownerFromAction,
 }: {
@@ -2077,13 +3012,21 @@ function RiskCard({
   movement: string;
   matchedConnections: MatchedConnectionPath[];
   calibration?: CompanyCalibrationInput | null;
+  calibratedKeys?: string[];
+  calibratedOverlay?: CalibratedExposure | null;
+  provenance?: IssueProvenance | null;
+  execMode?: boolean;
+  execEstimate?: ExecutiveEstimate | null;
   gateResult?: IssueGateResult | null;
   ownerFromAction?: string | null;
 }) {
   const modelStatus = getIssueModelStatus(risk.methodology);
-  const takeaway = getRiskSummary(risk).slice(0, 280);
+  const [showMethod, setShowMethod] = useState(false);
+  const rawTakeaway = getRiskSummary(risk).slice(0, 280);
+  const takeaway = execMode ? stripExecRanges(rawTakeaway) : rawTakeaway;
   const movementLabel = formatMovementLabel(movement);
-  const decisionTrigger = getTrustSafeDecisionTrigger(risk);
+  const rawDecisionTrigger = getTrustSafeDecisionTrigger(risk);
+  const decisionTrigger = execMode ? stripExecRanges(rawDecisionTrigger) : rawDecisionTrigger;
 
   return (
     <div className="record-card">
@@ -2091,9 +3034,17 @@ function RiskCard({
         <div>
           <div className="record-badge-row">
             <span className="orange-badge">
-              #{displayRank} {modelStatus.status === "scenario_fallback" ? "Scenario Risk" : "Risk"}
+              #{displayRank} {execMode
+                ? (execEstimate?.kind === "tariff" ? "Operating Change" : "Operating Risk")
+                : (modelStatus.status === "scenario_fallback" ? "Scenario Risk" : "Risk")}
             </span>
-            <ModelStatusBadge methodology={risk.methodology} />
+            {execMode ? (
+              execEstimate && execEstimate.value !== null && (
+                <span className="model-status model-status-evidence">{execEstimate.sourceLabel}</span>
+              )
+            ) : (
+              <ModelStatusBadge methodology={risk.methodology} />
+            )}
             {movementLabel && movementLabel !== "Unchanged" && (
               <span className="movement-chip">{movementLabel}</span>
             )}
@@ -2112,7 +3063,7 @@ function RiskCard({
           explanation={explainRiskPriority(risk)}
         />
         <Mini
-          label="Scenario confidence"
+          label={execMode ? "Confidence" : "Scenario confidence"}
           value={`${clampPercent(risk.probability)}%`}
           explanation={{
             title: "Scenario confidence",
@@ -2128,11 +3079,59 @@ function RiskCard({
           }}
         />
         <Mini
-          label={modelStatus.exposureLabel}
-          value={getRiskExposureDisplay(risk)}
+          label={execMode ? "Business estimate" : modelStatus.exposureLabel}
+          value={execMode && execEstimate ? execEstimate.display : getRiskExposureDisplay(risk)}
           explanation={explainRiskExposure(risk)}
         />
       </div>
+
+      {execMode && execEstimate ? (
+        <div className="exec-estimate">
+          <div className="exec-estimate-head">
+            <span className="exec-estimate-source">{execEstimate.sourceLabel}</span>
+            <span className="exec-estimate-conf">Confidence: {execEstimate.confidence}</span>
+          </div>
+          {execEstimate.calculation && <p className="exec-estimate-calc"><strong>Calculation:</strong> {execEstimate.calculation}</p>}
+          {execEstimate.sources.length > 0 && (
+            <p className="exec-estimate-sources"><strong>Sources:</strong> {execEstimate.sources.map((s) => `${s.label} — ${s.value}`).join(" · ")}</p>
+          )}
+          {execEstimate.caveat && <p className="exec-estimate-caveat">{execEstimate.caveat}</p>}
+          <div className="exec-methodology">
+            <button type="button" className="exec-methodology-toggle" onClick={() => setShowMethod((v) => !v)}>
+              {showMethod ? "▲ Hide methodology / sensitivity" : "▼ Show methodology / sensitivity"}
+            </button>
+            {showMethod && (
+              <div className="exec-methodology-body">
+                <p>Original pipeline scenario exposure: {getRiskExposureDisplay(risk)}</p>
+                {calibratedOverlay && (
+                  <p>Company-calibrated sensitivity: {calibratedOverlay.rangeLabel} ({calibratedOverlay.basisLabel} from {calibratedOverlay.rowCount} rows)</p>
+                )}
+                <p className="exec-methodology-note">Original ranges are retained for audit and are not used in executive-facing figures.</p>
+              </div>
+            )}
+          </div>
+        </div>
+      ) : calibratedOverlay ? (
+        <div className="calibrated-overlay">
+          <div className="calibrated-overlay-head">
+            <span className="calibrated-overlay-badge">Company-calibrated</span>
+            <span className="calibrated-overlay-range">{calibratedOverlay.rangeLabel}</span>
+            <span className="calibrated-overlay-basis">
+              {calibratedOverlay.basisLabel} from {calibratedOverlay.rowCount} imported row{calibratedOverlay.rowCount === 1 ? "" : "s"}
+            </span>
+          </div>
+          <div className="calibrated-overlay-inputs">
+            {calibratedOverlay.inputs.map((inp) => (
+              <span key={inp.label} className="calibrated-overlay-input">
+                {inp.label}: <strong>{inp.value}</strong>
+              </span>
+            ))}
+          </div>
+          <p className="calibrated-overlay-note">
+            Recomputed from imported data using the same shock model. The {modelStatus.exposureLabel.toLowerCase()} above is the published value; this overlay shows what the company's own data implies.
+          </p>
+        </div>
+      ) : null}
 
       {takeaway && (
         <p className="card-takeaway">{takeaway}</p>
@@ -2157,11 +3156,16 @@ function RiskCard({
               businessImpact: getRiskBusinessImpact(risk),
             }}
             issueForPath={risk}
+            pathShockLabel={isFreightIssue(risk) ? "BLS freight/logistics PPI +0.8%" : isTariffIssue(risk) ? "Tariff 25% → 15%" : undefined}
           />
-          {(isFreightIssue(risk) || isTariffIssue(risk) || risk.issue_category?.includes("commodity")) && (
+          {provenance && <ExternalShockProvenance prov={provenance} />}
+          {/* Scenario Editor (low/mid/high) is hidden by default in executive mode — it only
+              appears when the user opens "Show methodology / sensitivity". */}
+          {(!execMode || showMethod) && (isFreightIssue(risk) || isTariffIssue(risk) || risk.issue_category?.includes("commodity")) && (
             <ScenarioEditor
               mode={isFreightIssue(risk) ? "freight" : "commodity"}
               calibration={calibration ?? undefined}
+              calibratedKeys={calibratedKeys}
             />
           )}
           <DecisionMemoryPanel
@@ -2182,16 +3186,26 @@ function OperatingChangeCard({
   expanded,
   onToggle,
   matchedConnections,
+  execMode = false,
+  execEstimate = null,
 }: {
   risk: Risk;
   expanded: boolean;
   onToggle: () => void;
   matchedConnections: MatchedConnectionPath[];
+  execMode?: boolean;
+  execEstimate?: ExecutiveEstimate | null;
 }) {
   const safeExplanation = getOperatingChangeSummary(risk);
   const safeDecisionTrigger = getTrustSafeDecisionTrigger(risk);
   const isCompetitor = /competitor|competition|market.?share/i.test(risk.issue_category || risk.risk_title || "");
   const opChangeLabel = isCompetitor ? "Competitive Exposure Base" : "Operating Change";
+  // Canonical executive estimate is the source of truth (same as Dashboard/Exposure Graph).
+  // It supersedes any stale stored residual / article-extracted methodology.
+  const useExec = execMode && !!execEstimate && execEstimate.value !== null;
+  const execBusinessImpact = useExec
+    ? `Applied to Fastenal's calibrated steel-linked import exposure, the verified tariff metric implies approximately ${execEstimate!.display} of value at stake. ${execEstimate!.caveat ?? ""}`.trim()
+    : (risk.risk_interaction || risk.business_impact);
 
   return (
     <div className="record-card operating-change-card">
@@ -2210,15 +3224,31 @@ function OperatingChangeCard({
 
       <div className="mini-grid mini-grid-2">
         <Mini
-          label="Residual exposure"
-          value={getResidualExposureDisplay(risk)}
+          label={useExec ? "Value at stake" : "Residual exposure"}
+          value={useExec ? execEstimate!.display : getResidualExposureDisplay(risk)}
           explanation={explainRiskExposure(risk)}
         />
         <Mini
           label="Confidence"
-          value={`${clampPercent(risk.confidence)}% · ${formatConfidenceLabel(risk.confidence)}`}
+          value={useExec ? execEstimate!.confidence : `${clampPercent(risk.confidence)}% · ${formatConfidenceLabel(risk.confidence)}`}
         />
       </div>
+
+      {useExec && (
+        <div className="exec-estimate">
+          <div className="exec-estimate-head">
+            <span className="exec-estimate-source">{execEstimate!.sourceLabel}</span>
+            <span className="exec-estimate-conf">Confidence: {execEstimate!.confidence}</span>
+          </div>
+          {execEstimate!.calculation && (
+            <p className="exec-estimate-calc"><strong>Calculation:</strong> {execEstimate!.calculation}</p>
+          )}
+          {execEstimate!.sources.length > 0 && (
+            <p className="exec-estimate-sources"><strong>Sources:</strong> {execEstimate!.sources.map((s) => `${s.label} — ${s.value}`).join(" · ")}</p>
+          )}
+          {execEstimate!.caveat && <p className="exec-estimate-caveat">{execEstimate!.caveat}</p>}
+        </div>
+      )}
 
       {safeExplanation && (
         <p className="card-takeaway">{safeExplanation}</p>
@@ -2240,9 +3270,10 @@ function OperatingChangeCard({
           overviewContent={{
             whatChanged: getOperatingChangeSummary(risk),
             whyNow: risk.why_now,
-            businessImpact: risk.risk_interaction || risk.business_impact,
+            businessImpact: execBusinessImpact,
           }}
           issueForPath={risk}
+          pathShockLabel={isTariffIssue(risk) ? "Tariff 25% → 15%" : undefined}
         />
       )}
     </div>
@@ -2513,6 +3544,7 @@ function DetailPanel({
   sectionType,
   overviewContent,
   issueForPath,
+  pathShockLabel,
 }: {
   methodology?: Methodology | null;
   evidence: EvidenceItem[];
@@ -2527,6 +3559,9 @@ function DetailPanel({
     modelNote?: string | null;
   } | null;
   issueForPath?: Risk | Opportunity | null;
+  // Canonical shock label to replace generic stored placeholders (e.g. "1% price move")
+  // in the qualitative impact path, so the path reflects the verified shock.
+  pathShockLabel?: string;
 }) {
   const [activeTab, setActiveTab] = useState<"path" | "evidence" | "audit">("path");
   const [showAllEvidence, setShowAllEvidence] = useState(false);
@@ -2599,6 +3634,46 @@ function DetailPanel({
     return null;
   })();
 
+  // Replace generic stored shock placeholders (e.g. "1% price move", "1% move") in the
+  // qualitative impact path with the canonical verified-shock label for this issue.
+  const sanitizedPathNodes = bestPathNodes
+    ? bestPathNodes.map((n: any) =>
+        /\b1%\s*(price\s*)?move\b|\bprice move\b/i.test(String(n))
+          ? (pathShockLabel || "Verified external price signal")
+          : n
+      )
+    : null;
+
+  // Canonical operating paths for known issues — overrides generic stored connection nodes
+  // (e.g. "Manufacturing Customers") so executive impact paths are accurate. Unknown issues
+  // fall back to the sanitized stored path.
+  const CANONICAL_IMPACT_PATHS: Record<string, string[]> = {
+    freight: [
+      "Freight",
+      "BLS freight/logistics PPI +0.8%",
+      "Spot-exposed freight spend",
+      "Current-period logistics cost pressure",
+      "Customer pricing / contract pass-through",
+      "Margin exposure",
+    ],
+    tariff: [
+      "Tariff 25% → 15%",
+      "Steel-linked import exposure",
+      "Unpassed landed-cost exposure",
+      "Supplier landed-cost validation",
+      "COGS relief / margin impact",
+    ],
+  };
+  const canonicalPath =
+    issueForPath && "risk_title" in issueForPath
+      ? isFreightIssue(issueForPath as Risk)
+        ? CANONICAL_IMPACT_PATHS.freight
+        : isTariffIssue(issueForPath as Risk)
+        ? CANONICAL_IMPACT_PATHS.tariff
+        : null
+      : null;
+  const cleanPathNodes = canonicalPath ?? sanitizedPathNodes;
+
   return (
     <div className="analysis-panel">
       <div className="analysis-tabs">
@@ -2651,8 +3726,8 @@ function DetailPanel({
 
           <div className="analysis-path-section">
             <p className="analysis-path-label">How Impact Reaches Fastenal</p>
-            {bestPathNodes && bestPathNodes.length >= 2 ? (
-              <LayeredPath nodes={bestPathNodes} />
+            {cleanPathNodes && cleanPathNodes.length >= 2 ? (
+              <LayeredPath nodes={cleanPathNodes} />
             ) : (
               <p className="muted">No impact path available. Run Build Exposure Graph to generate paths.</p>
             )}
@@ -2835,11 +3910,11 @@ function ExplanationTooltipContent({
     display: "flex",
     flexDirection: "column" as const,
     gap: "4px",
-    color: "#fff7ed",
+    color: "var(--tooltip-text-muted)",
   };
 
   const labelStyle = {
-    color: "#fed7aa",
+    color: "var(--tooltip-accent)",
     fontSize: "10px",
     fontWeight: 900,
     letterSpacing: "0.06em",
@@ -2847,7 +3922,7 @@ function ExplanationTooltipContent({
   };
 
   const lineStyle = {
-    color: "#fff7ed",
+    color: "var(--tooltip-text-muted)",
     fontSize: "12px",
     lineHeight: 1.45,
   };
@@ -2858,7 +3933,8 @@ function ExplanationTooltipContent({
         display: "flex",
         flexDirection: "column",
         gap: "10px",
-        color: "#fffdf8",
+        color: "var(--tooltip-text)",
+        fontFamily: "var(--app-font)",
         fontSize: "12px",
         lineHeight: 1.45,
         textAlign: "left",
@@ -2867,11 +3943,12 @@ function ExplanationTooltipContent({
       <strong
         style={{
           display: "block",
-          color: "#ffffff",
+          color: "var(--tooltip-heading)",
+          fontFamily: "var(--app-font)",
           fontSize: "13px",
           fontWeight: 850,
           paddingBottom: "6px",
-          borderBottom: "1px solid rgba(255, 253, 248, 0.18)",
+          borderBottom: "1px solid var(--tooltip-border)",
         }}
       >
         {explanation.title}
@@ -3057,16 +4134,18 @@ function SmartTooltip({
 
               padding: "14px",
               borderRadius: "14px",
-              border: "1px solid #5f4a38",
-              background: "#2b2118",
-              color: "#fffdf8",
-              boxShadow: "0 18px 45px rgba(43, 33, 24, 0.32)",
+              border: "1px solid var(--tooltip-border)",
+              background: "var(--tooltip-bg)",
+              color: "var(--tooltip-text)",
+              boxShadow: "var(--tooltip-shadow)",
 
+              fontFamily: "var(--app-font)",
               fontSize: "12px",
               lineHeight: 1.45,
               whiteSpace: "normal",
               textAlign: "left",
               pointerEvents: "none",
+              animation: "gs-tooltip-in 160ms cubic-bezier(0.25, 1, 0.5, 1) both",
             }}
           >
             {content}
@@ -3381,6 +4460,23 @@ function getIssueModelStatus(methodology?: Methodology | null): {
       label: "Evidence-backed",
       className: "model-status model-status-evidence",
       exposureLabel: "Evidence-backed exposure",
+    };
+  }
+
+  // Verified public/official metrics (BLS PPI, manual structured tariff metric, etc.) are
+  // source-backed — not scenario assumptions.
+  if (
+    source.includes("bls") ||
+    source.includes("verified") ||
+    source.includes("structured") ||
+    source.includes("manual_metric") ||
+    source.includes("official")
+  ) {
+    return {
+      status: "evidence_backed",
+      label: "Source-backed",
+      className: "model-status model-status-evidence",
+      exposureLabel: "Source-backed exposure",
     };
   }
 
@@ -3711,7 +4807,7 @@ function deriveActionRoiFields(
       deadline: action.deadline || null,
       effortLevel: "Medium",
       successCondition: "Supplier country-of-origin confirmed, import-category exposure sized, landed-cost assumptions updated.",
-      nextStep: "Pull supplier country-of-origin list and classify steel, aluminum, and copper import exposure by category.",
+      nextStep: "Pull supplier country-of-origin list and validate steel-linked import exposure; flag aluminum/copper separately if additional tariff metrics or supplier evidence are available.",
       decisionTrigger: "exposed imports exceed $10M or suppliers have not confirmed updated landed costs",
     };
   }
@@ -3908,7 +5004,7 @@ function formatIssueDirection(value: string | null | undefined) {
   const text = String(value || "").toLowerCase().trim();
 
   if (text === "favorable_with_residual_exposure") {
-    return "Favorable + residual";
+    return "Tariff relief · validation pending";
   }
 
   if (text === "mixed_or_uncertain") {
@@ -4108,6 +5204,27 @@ function explainRiskPriority(risk: Risk): NumberExplanation {
     caveat: urgencyNote,
   };
 }
+// Strip min–max dollar ranges + scenario/range wording from generated narrative in
+// executive mode, and replace the legacy "did not find a clean rate … scenario-modeled"
+// freight clause with clean executive copy.
+function stripExecRanges(text: string): string {
+  if (!text) return text;
+  let t = text
+    // Remove the legacy freight "did not find a clean … rate, so the $X–$Y range is scenario-modeled" sentence.
+    .replace(/GroundSense did not find a clean[^.]*\./gi, "Public logistics data supports current price pressure, while lane-specific freight-rate validation remains pending.")
+    // Generic range → estimate.
+    .replace(/\$[\d.,]+\s*[KMB]?\s*[–-]\s*\$[\d.,]+\s*[KMB]?(\s+(scenario\s+)?range)?/gi, "a source-backed estimate")
+    .replace(/\bscenario downside range\b/gi, "operating downside")
+    .replace(/\bmodeled range\b/gi, "source-backed estimate")
+    // Drop any leftover sentence that still asserts scenario-modeled.
+    .replace(/[^.]*\bis scenario-modeled\b[^.]*\.?/gi, "")
+    .replace(/\bscenario-modeled\b/gi, "source-backed")
+    .replace(/\bthe a source-backed estimate\b/gi, "a source-backed estimate")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  return t;
+}
+
 function getRiskExposureDisplay(risk: Risk) {
   if (
     risk.methodology?.calibration_status === "needs_calibration" ||

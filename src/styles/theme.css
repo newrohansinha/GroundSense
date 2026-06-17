@@ -1,0 +1,214 @@
+/* GroundSense design system — semantic tokens (light & dark).
+   Single source of truth for color. Every surface/text/border/badge/graph color in the app
+   resolves to one of these tokens, so a single data-theme flip re-skins the whole product.
+   Clean enterprise direction: neutral surfaces, thin borders, one warm accent, no gradients/glass.
+   Dark mode avoids pure black/white and keeps accessible contrast. */
+
+:root[data-theme="light"] {
+  /* Backgrounds */
+  --bg-app: #f4f5f7;
+  --bg-page: #f4f5f7;
+  --bg-surface: #ffffff;
+  --bg-surface-muted: #f4f5f7;
+  --bg-surface-elevated: #ffffff;
+  --bg-inset: #eceef1;
+
+  /* Text */
+  --text-primary: #1c2330;
+  --text-secondary: #3f4756;
+  --text-muted: #66707e;
+  --text-faint: #98a0ac;
+  --text-disabled: #b6bcc6;
+  --text-inverse: #ffffff;
+  /* Inverse surface — tooltips / dark pills that stay dark in both modes */
+  --bg-inverse: #1c2330;
+  --text-on-inverse: #f4f5f7;
+
+  /* Borders */
+  --border-subtle: #edeff2;
+  --border-default: #e1e4e9;
+  --border-strong: #cdd2da;
+
+  /* Accent */
+  --accent: #c2620a;
+  --accent-hover: #9c4e07;
+  --accent-muted: #fbf0e3;
+
+  /* Status — fg / bg / border triples */
+  --risk: #b23b28;            --risk-bg: #f8e7e3;            --risk-border: #efcec6;
+  --operating-change: #2f4a93; --operating-change-bg: #e9edfb; --operating-change-border: #d4dcf6;
+  --opportunity: #1f7a46;     --opportunity-bg: #e7f4ec;
+  --watch: #5c6573;           --watch-bg: #eef0f3;
+  --success: #1f7a46;         --success-bg: #e7f4ec;        --success-border: #c2e3cf;
+  --warning: #8a5a13;         --warning-bg: #fbf1da;        --warning-border: #ecd8a8;
+  --danger: #b23b28;          --danger-bg: #f8e7e3;         --danger-border: #efcec6;
+  --blocked: #b23b28;         --blocked-bg: #f8e7e3;
+  --support: #2f4a93;         --support-bg: #e9edfb;
+
+  /* Graph */
+  --graph-node-bg: #ffffff;
+  --graph-node-border: #e1e4e9;
+  --graph-edge: #cdd2da;
+  --graph-edge-muted: #e1e4e9;
+  --graph-node-selected: #c2620a;
+  --graph-grid: #edeff2;
+
+  --shadow-sm: 0 1px 2px rgba(20, 25, 35, 0.05);
+  --shadow-pop: 0 4px 16px rgba(20, 25, 35, 0.10);
+  --shadow-lift: 0 6px 20px rgba(20, 25, 35, 0.12);
+}
+
+/* ── Motion easing tokens ── */
+:root {
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-expo:  cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+:root,
+:root[data-theme="dark"] {
+  /* Backgrounds */
+  --bg-app: #0e1014;
+  --bg-page: #0e1014;
+  --bg-surface: #181b21;
+  --bg-surface-muted: #1f232b;
+  --bg-surface-elevated: #21262f;
+  --bg-inset: #131519;
+
+  /* Text */
+  --text-primary: #e7eaee;
+  --text-secondary: #c0c6d0;
+  --text-muted: #969da9;
+  --text-faint: #6e7682;
+  --text-disabled: #565d68;
+  --text-inverse: #ffffff;
+  --bg-inverse: #2a3140;
+  --text-on-inverse: #f4f5f7;
+
+  /* Borders */
+  --border-subtle: #23272f;
+  --border-default: #2c313b;
+  --border-strong: #3c4350;
+
+  /* Accent */
+  --accent: #e8923a;
+  --accent-hover: #f2a960;
+  --accent-muted: #2a2017;
+
+  /* Status */
+  --risk: #e57c66;            --risk-bg: #2c1b17;            --risk-border: #4a2a22;
+  --operating-change: #8ba2e2; --operating-change-bg: #1a2233; --operating-change-border: #2b3654;
+  --opportunity: #54c489;     --opportunity-bg: #15271d;
+  --watch: #99a0ac;           --watch-bg: #20242c;
+  --success: #54c489;         --success-bg: #15271d;        --success-border: #295539;
+  --warning: #d8a657;         --warning-bg: #2a2316;        --warning-border: #4a3d1d;
+  --danger: #e57c66;          --danger-bg: #2c1b17;         --danger-border: #4a2a22;
+  --blocked: #e57c66;         --blocked-bg: #2c1b17;
+  --support: #8ba2e2;         --support-bg: #1a2233;
+
+  /* Graph */
+  --graph-node-bg: #181b21;
+  --graph-node-border: #2c313b;
+  --graph-edge: #3c4350;
+  --graph-edge-muted: #2c313b;
+  --graph-node-selected: #e8923a;
+  --graph-grid: #23272f;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 6px 20px rgba(0, 0, 0, 0.5);
+  --shadow-lift: 0 8px 28px rgba(0, 0, 0, 0.55);
+}
+
+/* ── Legacy alias layer ──────────────────────────────────────────────────────
+   Earlier components/styles reference --gs-* names. Alias them to the semantic
+   tokens so they re-theme too without a second rewrite. */
+:root {
+  --gs-bg: var(--bg-app);
+  --gs-surface: var(--bg-surface);
+  --gs-surface-2: var(--bg-surface-muted);
+  --gs-border: var(--border-default);
+  --gs-border-strong: var(--border-strong);
+  --gs-text: var(--text-primary);
+  --gs-text-muted: var(--text-muted);
+  --gs-text-faint: var(--text-faint);
+  --gs-accent: var(--accent);
+  --gs-accent-strong: var(--accent-hover);
+  --gs-accent-soft: var(--accent-muted);
+  --gs-good: var(--success);
+  --gs-good-soft: var(--success-bg);
+  --gs-warn: var(--warning);
+  --gs-warn-soft: var(--warning-bg);
+  --gs-danger: var(--danger);
+  --gs-danger-soft: var(--danger-bg);
+  --gs-info: var(--support);
+  --gs-info-soft: var(--support-bg);
+  --gs-shadow: var(--shadow-sm);
+  --gs-shadow-pop: var(--shadow-pop);
+
+  /* Always-light text/accent for the always-dark inverse surfaces (tooltips, dark pills).
+     Defined once (same in light & dark) so tooltip text stays readable in both themes. */
+  --text-on-inverse-dim: rgba(244, 245, 247, 0.82);
+  --accent-on-inverse: #f0a661;
+  --border-on-inverse: rgba(244, 245, 247, 0.16);
+
+  /* App font stack — explicit so portal-rendered tooltips don't fall back to a browser default. */
+  --app-font: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+
+  /* Standardized tooltip / hover-card tokens (always-dark inverse surface, readable in both modes). */
+  --tooltip-bg: var(--bg-inverse);
+  --tooltip-border: var(--border-on-inverse);
+  --tooltip-text: var(--text-on-inverse);
+  --tooltip-text-muted: var(--text-on-inverse-dim);
+  --tooltip-heading: var(--text-on-inverse);
+  --tooltip-accent: var(--accent-on-inverse);
+  --tooltip-shadow: 0 18px 45px rgba(0, 0, 0, 0.45);
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+/* Form controls inherit theme by default so nothing renders as a white browser default. */
+input,
+textarea,
+select {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+::placeholder { color: var(--text-faint); }
+
+/* ── Custom scrollbars ──────────────────────────────────────────────────────── */
+/* Vertical page scroll + any overflow:auto container.
+   5px pill thumbs on a transparent track; thumb color adapts via token flip. */
+
+html {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 10px;
+  transition: background 140ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}

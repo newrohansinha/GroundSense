@@ -1304,6 +1304,36 @@ function resolveShockRange(input: {
   };
 }
 
+// Stable issue key for non-destructive merge. MUST match the SQL backfill in
+// migration 20260613002000 so generated rows upsert onto existing rows by (company_id, issue_key).
+function simpleStableHash(s: string): string {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return Math.abs(h).toString(36).slice(0, 12);
+}
+
+// Canonical "why now" for known issue keys — enforced on every generation so a noisy news
+// run can never overwrite these with article-style copy.
+const CANONICAL_WHY_NOW: Record<string, string> = {
+  tariff_trade_policy_relief:
+    "A verified manual tariff metric changed from 25% to 15%, creating a procurement validation window before supplier landed-cost updates and open POs reflect the new rate.",
+  freight_logistics_pressure:
+    "Freight surcharges and spot-rate exposure are live operating decisions. Waiting to validate lane-level exposure increases risk of unbudgeted freight cost.",
+};
+
+function computeIssueKey(cluster: any): string {
+  const title = norm(cluster.risk_title);
+  const both = `${title} ${norm(cluster.risk_type)}`;
+  if (/freight|logistic|shipping|container/.test(both)) return "freight_logistics_pressure";
+  if (/tariff|duty|trade/.test(both)) return "tariff_trade_policy_relief";
+  if (/copper/.test(title)) return "copper_macro_watch";
+  if (/aluminum|aluminium/.test(title)) return "aluminum_macro_watch";
+  if (/steel/.test(title)) return "steel_metal_watch";
+  if (/demand|pmi|manufacturing|construction/.test(both)) return "demand_macro_watch";
+  if (/compet|grainger|msc|applied/.test(both)) return "competitor_watch";
+  return "issue_" + simpleStableHash(title);
+}
+
 function classifyExecutiveIssue(input: {
   cluster: any;
   exposureCalc: any;
@@ -2704,13 +2734,11 @@ Deno.serve(async (req: Request) => {
 
     const clusters = safeArray(clustered.risk_clusters).slice(0, 3);
 
-    await supabase
-      .from("risk_actions")
-      .delete()
-      .eq("company_id", companyId)
-      .eq("source_type", "risk");
-
-    await supabase.from("risk_register").delete().eq("company_id", companyId);
+    // NON-DESTRUCTIVE MERGE. We never delete the company's existing risks/actions. Generated
+    // issues are upserted by (company_id, issue_key); issues not regenerated this run are
+    // preserved (e.g. a tariff operating change a noisy news run failed to re-cluster).
+    const runId = crypto.randomUUID();
+    const nowIso = new Date().toISOString();
 
     const riskRows = clusters
       .map((cluster: any, index: number) => {
@@ -2758,6 +2786,9 @@ Deno.serve(async (req: Request) => {
 
         return {
           company_id: companyId,
+          issue_key: computeIssueKey(cluster),
+          last_seen_run_id: runId,
+          last_seen_at: nowIso,
           risk_title: cleanText(cluster.risk_title, 180),
           risk_type: cleanText(cluster.risk_type, 80) || "evidence_cluster",
           issue_category: issueClassification.issue_category,
@@ -2795,7 +2826,7 @@ exposure_interpretation: issueClassification.exposure_interpretation,
           risk_rank: index + 1,
 
           what_happened: cleanText(cluster.what_happened, 2000),
-          why_now: cleanText(cluster.why_now, 2000),
+          why_now: CANONICAL_WHY_NOW[computeIssueKey(cluster)] ?? cleanText(cluster.why_now, 2000),
           risk_interaction: cleanText(cluster.business_impact, 2000),
           evidence_summary: cleanText(cluster.why_this_cluster_exists, 1000),
           explanation_confidence: Math.round(confidence),
@@ -2829,6 +2860,103 @@ exposure_interpretation: issueClassification.exposure_interpretation,
       })
       .filter(Boolean);
 
+      // ── Publication gate (deterministic, downgrade-only) ───────────────────
+      // Weak/news-like candidates must not publish as active risks. This only
+      // DOWNGRADES (risk → watch) and rewrites article-like titles / generic
+      // "monitor" actions into operating-exposure copy, and records a per-row
+      // gate_reason in methodology. Established issues are preserved on UPDATE
+      // (see merge below), so this affects new INSERTs only — demo-safe.
+      const GATE_DRIVER_TITLES: Record<string, string> = {
+        freight_logistics_pressure: "Spot-exposed freight lanes require surcharge validation",
+        tariff_trade_policy_relief: "Tariff-linked supplier cost exposure requires country-of-origin validation",
+        steel_metal_watch: "Steel-linked supplier landed-cost exposure requires validation",
+        copper_macro_watch: "Copper-linked supplier cost exposure requires validation",
+        aluminum_macro_watch: "Aluminum-linked supplier cost exposure requires validation",
+        demand_macro_watch: "Customer demand shift requires segment-level quote validation",
+        competitor_watch: "Competitive pricing pressure requires account-level validation",
+      };
+      const GATE_DRIVER_ACTIONS: Record<string, { owner: string; next: string }> = {
+        freight_logistics_pressure: { owner: "Head of Logistics", next: "Pull top spot-exposed lanes, current surcharge terms, carrier contract coverage, and repricing dates." },
+        tariff_trade_policy_relief: { owner: "Head of Procurement", next: "Pull top tariff-exposed supplier spend by SKU, country of origin, HTS code, supplier price update, and open PO value." },
+        steel_metal_watch: { owner: "Head of Procurement", next: "Pull top steel-linked supplier spend by SKU, country of origin, HTS code, supplier price update, and pass-through status." },
+        copper_macro_watch: { owner: "Head of Procurement", next: "Validate copper-linked supplier spend, country of origin, and pass-through exposure." },
+        aluminum_macro_watch: { owner: "Head of Procurement", next: "Validate aluminum-linked supplier spend, country of origin, and pass-through exposure." },
+        demand_macro_watch: { owner: "VP Sales", next: "Validate quote volume, win rate, pipeline conversion, and customer segment exposure." },
+        competitor_watch: { owner: "Head of Commercial", next: "Validate account-level win/loss, price gaps, and at-risk revenue by segment." },
+      };
+      const ARTICLE_TITLE_RE = /(['’]s )|(\bpost-)|\(|acquisition|merger|to buy|to acquire/i;
+      const GENERIC_ACTION_RE = /^(monitor|track|keep an eye|watch|stay informed|observe)\b/i;
+      const gateDriverKey = (issueKey: string): string | null =>
+        GATE_DRIVER_TITLES[issueKey] ? issueKey
+          : issueKey.startsWith("steel") ? "steel_metal_watch"
+          : issueKey.startsWith("copper") ? "copper_macro_watch"
+          : issueKey.startsWith("aluminum") ? "aluminum_macro_watch"
+          : issueKey.startsWith("tariff") ? "tariff_trade_policy_relief"
+          : issueKey.startsWith("freight") ? "freight_logistics_pressure"
+          : null;
+
+      for (const row of riskRows as any[]) {
+        const m = row.methodology || {};
+        const ci = m.calculation_inputs || {};
+        const calibratedInputs = Object.keys(ci).filter(
+          (k) => ci[k] !== null && ci[k] !== undefined && ci[k] !== ""
+        );
+        const hasFormula = m.formula_status !== "not_calculated" && (!!m.formula || !!m.formula_text || calibratedInputs.length >= 2);
+        const hasValue = Number(row.impact_high || 0) > 0;
+        const hasEvidence = Array.isArray(row.evidence_items) && row.evidence_items.length > 0;
+        const driverKey = gateDriverKey(row.issue_key);
+        const isActive = row.display_section === "risk_register" || row.display_section === "operating_changes";
+
+        // Operating-exposure title (article title preserved as external signal).
+        if (isActive && driverKey && ARTICLE_TITLE_RE.test(String(row.risk_title || ""))) {
+          m.external_signal_title = row.risk_title;
+          row.risk_title = GATE_DRIVER_TITLES[driverKey];
+        }
+        // Operational action (replace generic "monitor X").
+        const genericAction = GENERIC_ACTION_RE.test(String(row.action_required || "").trim());
+        if (isActive && driverKey && (genericAction || !String(row.action_required || "").trim())) {
+          row.action_required = GATE_DRIVER_ACTIONS[driverKey].next;
+          if (!row.owner || row.owner === "Executive Owner") row.owner = GATE_DRIVER_ACTIONS[driverKey].owner;
+        }
+
+        const missing: string[] = [];
+        if (!hasEvidence) missing.push("primary_evidence");
+        if (calibratedInputs.length < 2) missing.push("calibrated_inputs");
+        if (!hasFormula) missing.push("calculation_formula");
+        if (!hasValue) missing.push("value_at_stake");
+        if (!row.owner || row.owner === "Executive Owner") missing.push("owner");
+        if (GENERIC_ACTION_RE.test(String(row.action_required || "").trim())) missing.push("operational_action");
+
+        let gate_status = "published";
+        let gate_reason =
+          "Published as active risk: source-backed signal with company exposure basis, calibrated inputs, a calculation formula, and an operational owner action.";
+        if (isActive && missing.length > 0) {
+          row.display_section = "watchlist";
+          row.issue_category = "watchlist";
+          row.is_actionable_risk = false;
+          gate_status = "watch";
+          gate_reason = `Watch only — not published as active risk because it is missing: ${missing.join(", ")}. Provide these to promote.`;
+        } else if (!isActive) {
+          gate_status = "watch";
+          gate_reason = row.exposure_interpretation || "Watch: relevant external signal without a sufficient, validated direct company exposure basis.";
+        }
+
+        const verified = m.calibration_status === "calibrated" && (m.has_verified_shock === true || m.shock_interpretation === "adverse_verified_shock");
+        const scenario_status = gate_status === "watch" ? "watch_no_estimate"
+          : verified ? "verified_metric"
+          : calibratedInputs.length >= 2 ? "company_calibrated_scenario"
+          : "pending_validation";
+
+        row.methodology = {
+          ...m,
+          gate_status,
+          gate_reason,
+          missing_inputs: missing,
+          scenario_status,
+          calibration_inputs_used: calibratedInputs,
+        };
+      }
+
       riskRows.sort((a: any, b: any) => {
   const priorityDiff = Number(b.priority_score || 0) - Number(a.priority_score || 0);
   if (priorityDiff !== 0) return priorityDiff;
@@ -2848,53 +2976,150 @@ riskRows.forEach((row: any, index: number) => {
       return jsonResponse({
         ok: true,
         inserted: 0,
-        message: "Gemini produced no valid risk clusters with evidence.",
+        merged: 0,
+        message: "No new material clusters this run. Existing published intelligence preserved.",
         clusters,
       });
     }
 
-    const { data: insertedRisks, error: insertError } = await supabase
-  .from("risk_register")
-  .insert(riskRows)
-  .select(
-    "id, risk_title, owner, action_required, expected_benefit, due_days, display_section, is_actionable_risk"
-  );
-    if (insertError) throw insertError;
-
-    const actionRows = (insertedRisks || [])
-  .filter((risk: any) => risk.is_actionable_risk !== false)
-  .filter((risk: any) => risk.display_section === "risk_register")
-  .map((risk: any) => {
-      const deadline = new Date();
-      deadline.setUTCDate(deadline.getUTCDate() + Number(risk.due_days || 14));
-
-      return {
-        company_id: companyId,
-        risk_id: risk.id,
-        title: risk.action_required,
-        owner: risk.owner,
-        deadline: deadline.toISOString().slice(0, 10),
-        expected_benefit: risk.expected_benefit,
-        status: "open",
-        source_type: "risk",
-      };
+    // Dedupe within this run by issue_key (rows are pre-sorted by priority; keep the first)
+    // so one upsert statement never writes the same (company_id, issue_key) twice.
+    const seenKeys = new Set<string>();
+    const dedupedRows = riskRows.filter((row: any) => {
+      if (seenKeys.has(row.issue_key)) return false;
+      seenKeys.add(row.issue_key);
+      return true;
     });
 
-    if (actionRows.length > 0) {
-      const { error: actionError } = await supabase
-        .from("risk_actions")
-        .insert(actionRows);
+    // NON-DESTRUCTIVE MERGE by (company_id, issue_key). Matched issues UPDATE in place
+    // (id + created_at preserved → decision memory / outcomes survive). Issues NOT regenerated
+    // this run are left untouched (preserved) — nothing is deleted. New issues INSERT.
+    //
+    // CRITICAL: an established issue's CLASSIFICATION is identity, not a per-run estimate. The
+    // Gemini classifier is non-deterministic, so on UPDATE we PRESERVE issue_category /
+    // display_section / issue_direction / is_actionable_risk / exposure_interpretation and only
+    // refresh the volatile fields (estimate, title, evidence, methodology, last_seen). Type is
+    // only set on INSERT (or by an explicit supersede/invalidate path, not implemented here).
+    const SELECT_COLS =
+      "id, issue_key, risk_title, owner, action_required, expected_benefit, due_days, display_section, is_actionable_risk";
+    const { data: existingRisks } = await supabase
+      .from("risk_register")
+      .select("id, issue_key")
+      .eq("company_id", companyId)
+      .in("issue_key", dedupedRows.map((r: any) => r.issue_key));
+    const existingRiskIdByKey = new Map<string, string>();
+    for (const r of existingRisks || []) existingRiskIdByKey.set(r.issue_key, r.id);
 
-      if (actionError) throw actionError;
+    const upsertedRisks: any[] = [];
+    let risksInserted = 0;
+    let risksUpdated = 0;
+    for (const row of dedupedRows) {
+      const existingId = existingRiskIdByKey.get(row.issue_key);
+      if (existingId) {
+        // Strip identity + estimate-basis fields so a noisy re-run never flips an established
+        // issue's type OR re-derives its stored estimate/methodology from article text. The
+        // executive view model is the live source of truth for displayed dollars; the stored
+        // methodology/impact/business_impact are only kept for the Model Audit and must stay
+        // canonical once set (e.g. the tariff operating change must not regress to an
+        // article-extracted "30% / $52.5M" basis).
+        const {
+          issue_category: _ic,
+          display_section: _ds,
+          issue_direction: _id,
+          is_actionable_risk: _iar,
+          exposure_interpretation: _ei,
+          company_id: _cid,
+          methodology: _m,
+          business_impact: _bi,
+          impact_low: _il,
+          impact_high: _ih,
+          ...updatable
+        } = row;
+        const { data, error } = await supabase
+          .from("risk_register")
+          .update(updatable)
+          .eq("id", existingId)
+          .select(SELECT_COLS)
+          .single();
+        if (error) throw error;
+        upsertedRisks.push(data);
+        risksUpdated++;
+      } else {
+        const { data, error } = await supabase
+          .from("risk_register")
+          .insert(row)
+          .select(SELECT_COLS)
+          .single();
+        if (error) throw error;
+        upsertedRisks.push(data);
+        risksInserted++;
+      }
+    }
+
+    // ── Action merge (idempotent, non-destructive) ──
+    // Create/update a validation action for actionable risks AND the canonical tariff operating
+    // change (which needs supplier landed-cost validation). Actions are never bulk-deleted.
+    const actionableIssues = (upsertedRisks || []).filter(
+      (risk: any) =>
+        (risk.is_actionable_risk !== false && risk.display_section === "risk_register") ||
+        risk.issue_key === "tariff_trade_policy_relief"
+    );
+
+    const { data: existingActions } = await supabase
+      .from("risk_actions")
+      .select("id, issue_key")
+      .eq("company_id", companyId);
+    const existingActionByKey = new Map<string, any>();
+    for (const a of existingActions || []) {
+      if (a.issue_key) existingActionByKey.set(a.issue_key, a);
+    }
+
+    let actionsCreated = 0;
+    let actionsUpdated = 0;
+    for (const risk of actionableIssues) {
+      const deadline = new Date();
+      deadline.setUTCDate(deadline.getUTCDate() + Number(risk.due_days || 14));
+      const isTariffChange = risk.issue_key === "tariff_trade_policy_relief";
+      const fields: Record<string, unknown> = {
+        company_id: companyId,
+        issue_key: risk.issue_key,
+        risk_id: risk.id,
+        title:
+          risk.action_required ||
+          (isTariffChange
+            ? "Validate tariff relief — confirm supplier landed-cost updates and remaining exposure"
+            : "Review the issue and decide whether mitigation is needed."),
+        owner: risk.owner || (isTariffChange ? "Head of Procurement" : "Executive Owner"),
+        deadline: deadline.toISOString().slice(0, 10),
+        expected_benefit: risk.expected_benefit,
+        source_type: isTariffChange ? "operating_change" : "risk",
+      };
+      const existing = existingActionByKey.get(risk.issue_key);
+      if (existing) {
+        // Preserve user-set status; refresh linkage/copy/deadline only.
+        const { error } = await supabase.from("risk_actions").update(fields).eq("id", existing.id);
+        if (error) throw error;
+        actionsUpdated++;
+      } else {
+        const { error } = await supabase.from("risk_actions").insert({ ...fields, status: "open" });
+        if (error) throw error;
+        actionsCreated++;
+      }
     }
 
     return jsonResponse({
       ok: true,
-      generator_version: "dynamic-evidence-cluster-risk-v3-explicit-shock-or-scenario",
+      generator_version: "dynamic-evidence-cluster-risk-v4-nondestructive-merge",
       evidence_loaded: evidence.length,
       clusters_returned: clusters.length,
-      inserted: riskRows.length,
-      risks: riskRows.map((row: any) => ({
+      merged: dedupedRows.length,
+      risks_inserted: risksInserted,
+      risks_updated: risksUpdated,
+      issue_keys: dedupedRows.map((r: any) => r.issue_key),
+      actions_created: actionsCreated,
+      actions_updated: actionsUpdated,
+      risks: dedupedRows.map((row: any) => ({
+        issue_key: row.issue_key,
         risk_title: row.risk_title,
         source_event_count: row.source_event_ids.length,
         evidence_titles: row.evidence_titles,

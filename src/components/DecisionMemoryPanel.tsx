@@ -148,9 +148,9 @@ export default function DecisionMemoryPanel({
       <style>{`
         .gs-decision-memory-panel {
           font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
-          color: #2b2118;
-          background: #fffdf8;
-          border: 1px solid #e7dccd;
+          color: var(--text-primary);
+          background: var(--bg-surface);
+          border: 1px solid var(--border-default);
           border-radius: 18px;
           padding: 20px;
           margin-bottom: 18px;
@@ -167,19 +167,19 @@ export default function DecisionMemoryPanel({
           font-size: 17px;
           font-weight: 700;
           letter-spacing: -0.02em;
-          color: #2b2118;
+          color: var(--text-primary);
         }
         .gs-dmp-issue-name {
           font-size: 13px;
-          color: #7a6a5d;
+          color: var(--text-muted);
           margin: 0;
         }
         .gs-dmp-record-btn {
           font-size: 13px;
           font-weight: 650;
-          color: #b45309;
+          color: var(--accent-hover);
           background: none;
-          border: 1px solid #e0c99a;
+          border: 1px solid var(--warning-border);
           border-radius: 8px;
           padding: 6px 12px;
           cursor: pointer;
@@ -188,8 +188,8 @@ export default function DecisionMemoryPanel({
           transition: background 120ms ease, border-color 120ms ease;
         }
         .gs-dmp-record-btn:hover {
-          background: #fef3d8;
-          border-color: #d4a855;
+          background: var(--warning-bg);
+          border-color: var(--warning);
         }
         .gs-dmp-status-grid {
           display: grid;
@@ -197,7 +197,7 @@ export default function DecisionMemoryPanel({
           gap: 12px 20px;
           margin-bottom: 16px;
           padding-bottom: 16px;
-          border-bottom: 1px solid #f0e9de;
+          border-bottom: 1px solid var(--bg-surface-muted);
         }
         .gs-dmp-field {
           display: flex;
@@ -209,35 +209,35 @@ export default function DecisionMemoryPanel({
           font-weight: 700;
           text-transform: uppercase;
           letter-spacing: 0.07em;
-          color: #9a8070;
+          color: var(--text-muted);
         }
         .gs-dmp-field-value {
           font-size: 14px;
-          color: #2b2118;
+          color: var(--text-primary);
           line-height: 1.4;
         }
         .gs-dmp-field-null {
           font-size: 14px;
-          color: #b8a898;
+          color: var(--text-faint);
           font-style: italic;
         }
         .gs-dmp-outcome-row {
           margin-bottom: 16px;
           padding-bottom: 16px;
-          border-bottom: 1px solid #f0e9de;
+          border-bottom: 1px solid var(--bg-surface-muted);
         }
         .gs-dmp-outcome-label {
           font-size: 11px;
           font-weight: 700;
           text-transform: uppercase;
           letter-spacing: 0.07em;
-          color: #9a8070;
+          color: var(--text-muted);
           display: block;
           margin-bottom: 3px;
         }
         .gs-dmp-outcome-text {
           font-size: 14px;
-          color: #5c4e3a;
+          color: var(--text-secondary);
         }
         .gs-dmp-decision-row {
           margin-bottom: 12px;
@@ -245,7 +245,7 @@ export default function DecisionMemoryPanel({
         }
         .gs-dmp-divider {
           border: none;
-          border-top: 1px solid #e7dccd;
+          border-top: 1px solid var(--border-default);
           margin: 16px 0;
         }
         .gs-dmp-form {
@@ -269,7 +269,7 @@ export default function DecisionMemoryPanel({
         .gs-dmp-label {
           font-size: 12px;
           font-weight: 650;
-          color: #5c4e3a;
+          color: var(--text-secondary);
           letter-spacing: 0.01em;
         }
         .gs-dmp-input,
@@ -277,9 +277,9 @@ export default function DecisionMemoryPanel({
         .gs-dmp-select {
           font-family: Inter, ui-sans-serif, system-ui, sans-serif;
           font-size: 14px;
-          color: #2b2118;
-          background: #fffef9;
-          border: 1px solid #d6c7b5;
+          color: var(--text-primary);
+          background: var(--bg-surface);
+          border: 1px solid var(--border-strong);
           border-radius: 8px;
           padding: 8px 10px;
           transition: border-color 120ms ease;
@@ -290,7 +290,7 @@ export default function DecisionMemoryPanel({
         .gs-dmp-input:focus,
         .gs-dmp-textarea:focus,
         .gs-dmp-select:focus {
-          border-color: #b45309;
+          border-color: var(--accent-hover);
         }
         .gs-dmp-textarea {
           resize: vertical;
@@ -306,37 +306,37 @@ export default function DecisionMemoryPanel({
         .gs-dmp-save-btn {
           font-size: 14px;
           font-weight: 650;
-          color: #ffffff;
-          background: #d97706;
-          border: 1px solid #b45309;
+          color: var(--text-inverse);
+          background: var(--accent);
+          border: 1px solid var(--accent-hover);
           border-radius: 9px;
           padding: 9px 18px;
           cursor: pointer;
           transition: background 120ms ease;
         }
         .gs-dmp-save-btn:hover {
-          background: #b45309;
+          background: var(--accent-hover);
         }
         .gs-dmp-cancel-btn {
           font-size: 13px;
           font-weight: 600;
-          color: #7a6a5d;
+          color: var(--text-muted);
           background: none;
           border: none;
           cursor: pointer;
           padding: 0;
         }
         .gs-dmp-cancel-btn:hover {
-          color: #2b2118;
+          color: var(--text-primary);
         }
         .gs-dmp-local-note {
           font-size: 12px;
-          color: #9a8070;
+          color: var(--text-muted);
           font-style: italic;
         }
         .gs-dmp-saved-banner {
           font-size: 13px;
-          color: #2b6b3a;
+          color: var(--success);
           font-weight: 600;
         }
       `}</style>

@@ -1,0 +1,249 @@
+/* Auth + onboarding shared chrome. Token-driven so it re-themes with the app.
+   Clean enterprise direction: neutral surfaces, thin borders, one warm accent. */
+
+.gs-auth {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1.05fr 1fr;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-family: var(--app-font);
+}
+
+/* Left rail — value proposition */
+.gs-auth-aside {
+  position: relative;
+  padding: 56px 56px 48px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-default);
+}
+
+.gs-auth-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: -0.01em;
+}
+.gs-auth-brand-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.gs-auth-pitch h1 {
+  font-size: 30px;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
+  margin: 0 0 16px;
+  max-width: 17ch;
+}
+.gs-auth-pitch p {
+  color: var(--text-secondary);
+  font-size: 15px;
+  line-height: 1.6;
+  margin: 0;
+  max-width: 42ch;
+}
+
+.gs-auth-flow {
+  margin-top: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.gs-auth-flow-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13.5px;
+  color: var(--text-secondary);
+}
+.gs-auth-flow-step b { color: var(--text-primary); font-weight: 600; }
+.gs-auth-flow-arrow { color: var(--text-faint); }
+
+.gs-auth-foot {
+  font-size: 12.5px;
+  color: var(--text-faint);
+}
+
+/* Right pane — the form */
+.gs-auth-main {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 24px;
+}
+.gs-auth-card {
+  width: 100%;
+  max-width: 408px;
+}
+.gs-auth-card h2 {
+  font-size: 22px;
+  letter-spacing: -0.015em;
+  margin: 0 0 6px;
+}
+.gs-auth-sub {
+  color: var(--text-muted);
+  font-size: 14px;
+  margin: 0 0 26px;
+}
+
+.gs-field { margin-bottom: 16px; }
+.gs-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+.gs-label {
+  display: block;
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.gs-label-opt { color: var(--text-faint); font-weight: 400; }
+.gs-input {
+  width: 100%;
+  box-sizing: border-box;
+  height: 40px;
+  padding: 0 12px;
+  font-size: 14px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.gs-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-muted);
+}
+.gs-input.is-error { border-color: var(--danger); }
+
+.gs-field-hint { font-size: 12px; color: var(--text-faint); margin: 6px 0 0; }
+.gs-field-error { font-size: 12px; color: var(--danger); margin: 6px 0 0; }
+
+.gs-btn-primary {
+  width: 100%;
+  height: 42px;
+  font-size: 14.5px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--accent);
+  border: none;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 120ms ease, opacity 120ms ease;
+}
+.gs-btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+.gs-btn-primary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.gs-btn-ghost {
+  width: 100%;
+  height: 42px;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: border-color 120ms ease, color 120ms ease;
+}
+.gs-btn-ghost:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.gs-btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.gs-auth-alert {
+  font-size: 13px;
+  padding: 11px 13px;
+  border-radius: 8px;
+  margin-bottom: 18px;
+  line-height: 1.45;
+}
+.gs-auth-alert.is-error {
+  color: var(--danger);
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+}
+.gs-auth-alert.is-success {
+  color: var(--success);
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+}
+
+.gs-auth-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 20px 0;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.gs-auth-divider::before,
+.gs-auth-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-default);
+}
+
+.gs-auth-alt {
+  text-align: center;
+  font-size: 13.5px;
+  color: var(--text-muted);
+  margin-top: 22px;
+}
+.gs-auth-link {
+  color: var(--accent);
+  font-weight: 550;
+  text-decoration: none;
+  cursor: pointer;
+  background: none;
+  border: none;
+  font-size: inherit;
+  padding: 0;
+}
+.gs-auth-link:hover { text-decoration: underline; }
+
+.gs-auth-meta-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: -4px;
+  margin-bottom: 18px;
+}
+
+/* Full-screen loading splash for route guards */
+.gs-route-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-app);
+  color: var(--text-muted);
+  font-size: 14px;
+  font-family: var(--app-font);
+}
+.gs-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: gs-spin 0.7s linear infinite;
+  margin-right: 11px;
+}
+@keyframes gs-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 860px) {
+  .gs-auth { grid-template-columns: 1fr; }
+  .gs-auth-aside { display: none; }
+  .gs-auth-main { padding: 32px 20px; }
+}

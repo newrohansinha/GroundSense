@@ -9,6 +9,9 @@ export type ActionRoiItem = {
   expectedBenefitHigh: number | null;
   effortLevel: string | null;
   protectedValue: number | null;
+  // Executive point-estimate strings (no ranges) — preferred in executive mode.
+  execBenefit?: string | null;
+  execProtected?: string | null;
   successCondition: string | null;
   nextStep: string | null;
   decisionTrigger: string | null;
@@ -18,6 +21,7 @@ export type ActionRoiItem = {
 type ActionRoiPanelProps = {
   actions: ActionRoiItem[];
   compact?: boolean;
+  execMode?: boolean;
   onStatusChange?: (id: string, status: string) => void;
 };
 
@@ -83,7 +87,7 @@ function EffortBadge({ effort }: { effort: string }) {
   return <span className={cls}>{effort}</span>;
 }
 
-export default function ActionRoiPanel({ actions, compact = false, onStatusChange }: ActionRoiPanelProps) {
+export default function ActionRoiPanel({ actions, compact = false, execMode = false, onStatusChange }: ActionRoiPanelProps) {
   const open = actions.filter(
     (a) => !["completed", "dismissed"].includes(a.status.toLowerCase().replace(/ /g, "_"))
   ).length;
@@ -96,9 +100,9 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
       <style>{`
         .gs-action-roi-panel {
           font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
-          color: #2b2118;
-          background: #fffdf8;
-          border: 1px solid #e7dccd;
+          color: var(--text-primary);
+          background: var(--bg-surface);
+          border: 1px solid var(--border-default);
           border-radius: 18px;
           padding: 20px;
           margin-bottom: 18px;
@@ -111,16 +115,16 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
           font-size: 17px;
           font-weight: 700;
           letter-spacing: -0.02em;
-          color: #2b2118;
+          color: var(--text-primary);
         }
         .gs-arp-subtitle {
           margin: 0;
           font-size: 13px;
-          color: #7a6a5d;
+          color: var(--text-muted);
         }
         .gs-arp-empty {
           font-size: 13px;
-          color: #9a8070;
+          color: var(--text-muted);
           font-style: italic;
           padding: 8px 0;
         }
@@ -130,15 +134,15 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
           gap: 12px;
         }
         .gs-arp-card {
-          border: 1px solid #e7dccd;
+          border: 1px solid var(--border-default);
           border-radius: 12px;
           padding: 14px 16px;
-          background: #fefcf8;
+          background: var(--bg-surface);
         }
         .gs-arp-card-title {
           font-weight: 680;
           font-size: 15px;
-          color: #2b2118;
+          color: var(--text-primary);
           margin: 0 0 8px;
           line-height: 1.3;
         }
@@ -151,11 +155,11 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
         }
         .gs-arp-meta-item {
           font-size: 13px;
-          color: #5c4e3a;
+          color: var(--text-secondary);
         }
         .gs-arp-meta-label {
           font-size: 12px;
-          color: #9a8070;
+          color: var(--text-muted);
           margin-right: 3px;
         }
         .gs-arp-benefit-row {
@@ -167,12 +171,12 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
         }
         .gs-arp-benefit {
           font-size: 14px;
-          color: #2b5a3e;
+          color: var(--success);
           font-weight: 600;
         }
         .gs-arp-detail-row {
           font-size: 13px;
-          color: #5c4e3a;
+          color: var(--text-secondary);
           margin-bottom: 4px;
           line-height: 1.4;
         }
@@ -181,11 +185,11 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
         }
         .gs-arp-detail-label {
           font-weight: 650;
-          color: #7a6a5d;
+          color: var(--text-muted);
         }
         .gs-arp-linked-issue {
           font-size: 12px;
-          color: #9a8070;
+          color: var(--text-muted);
           margin-bottom: 8px;
           font-style: italic;
         }
@@ -195,7 +199,7 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
           justify-content: space-between;
           gap: 12px;
           padding: 10px 0;
-          border-bottom: 1px solid #f0e9de;
+          border-bottom: 1px solid var(--bg-surface-muted);
         }
         .gs-arp-compact-card:last-child {
           border-bottom: none;
@@ -203,13 +207,13 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
         .gs-arp-compact-title {
           font-size: 14px;
           font-weight: 620;
-          color: #2b2118;
+          color: var(--text-primary);
           flex: 1;
           min-width: 0;
         }
         .gs-arp-compact-owner {
           font-size: 13px;
-          color: #7a6a5d;
+          color: var(--text-muted);
           white-space: nowrap;
         }
         .gs-arp-chip {
@@ -218,19 +222,19 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
           display: inline-block;
           white-space: nowrap;
         }
-        .gs-arp-chip-open { color: #5c4e3a; }
-        .gs-arp-chip-review { color: #7a5c2b; }
-        .gs-arp-chip-completed { color: #2b6b3a; }
-        .gs-arp-chip-dismissed { color: #9a8070; font-style: italic; }
+        .gs-arp-chip-open { color: var(--text-secondary); }
+        .gs-arp-chip-review { color: var(--warning); }
+        .gs-arp-chip-completed { color: var(--success); }
+        .gs-arp-chip-dismissed { color: var(--text-muted); font-style: italic; }
         .gs-arp-effort {
           font-size: 12px;
           font-weight: 600;
           display: inline-block;
           white-space: nowrap;
         }
-        .gs-arp-effort-low { color: #2b5a3e; }
-        .gs-arp-effort-medium { color: #7a5c2b; }
-        .gs-arp-effort-high { color: #8a3a1a; }
+        .gs-arp-effort-low { color: var(--success); }
+        .gs-arp-effort-medium { color: var(--warning); }
+        .gs-arp-effort-high { color: var(--danger); }
       `}</style>
 
       <div className="gs-arp-header">
@@ -281,7 +285,7 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
                   <select
                     value={action.status}
                     onChange={(e) => onStatusChange(action.id, e.target.value)}
-                    style={{ fontSize: 12, border: "1px solid #e7dccd", borderRadius: 6, padding: "2px 6px", background: "#fffdf8", color: "#5c4e3a", cursor: "pointer" }}
+                    style={{ fontSize: 12, border: "1px solid var(--border-default)", borderRadius: 6, padding: "2px 6px", background: "var(--bg-surface)", color: "var(--text-secondary)", cursor: "pointer" }}
                   >
                     <option value="open">Open</option>
                     <option value="in_review">In review</option>
@@ -294,25 +298,36 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
                 )}
               </div>
 
-              {(action.expectedBenefitLow !== null ||
-                action.expectedBenefitHigh !== null ||
-                action.effortLevel) && (
-                <div className="gs-arp-benefit-row">
-                  {(action.expectedBenefitLow !== null || action.expectedBenefitHigh !== null) && (
-                    <span className="gs-arp-benefit">
-                      {action.expectedBenefitLow !== null && action.expectedBenefitHigh !== null && action.expectedBenefitLow === action.expectedBenefitHigh
-                        ? `${formatMoney(action.expectedBenefitHigh)} modeled midpoint`
-                        : <>
-                            {action.expectedBenefitLow !== null ? formatMoney(action.expectedBenefitLow) : "?"}
-                            {" – "}
-                            {action.expectedBenefitHigh !== null ? formatMoney(action.expectedBenefitHigh) : "?"}
-                          </>
-                      }
-                      {" expected benefit"}
-                    </span>
-                  )}
-                  {action.effortLevel && <EffortBadge effort={action.effortLevel} />}
-                </div>
+              {execMode ? (
+                (action.execBenefit || action.effortLevel) && (
+                  <div className="gs-arp-benefit-row">
+                    {action.execBenefit && (
+                      <span className="gs-arp-benefit">{action.execBenefit} · expected benefit</span>
+                    )}
+                    {action.effortLevel && <EffortBadge effort={action.effortLevel} />}
+                  </div>
+                )
+              ) : (
+                (action.expectedBenefitLow !== null ||
+                  action.expectedBenefitHigh !== null ||
+                  action.effortLevel) && (
+                  <div className="gs-arp-benefit-row">
+                    {(action.expectedBenefitLow !== null || action.expectedBenefitHigh !== null) && (
+                      <span className="gs-arp-benefit">
+                        {action.expectedBenefitLow !== null && action.expectedBenefitHigh !== null && action.expectedBenefitLow === action.expectedBenefitHigh
+                          ? `${formatMoney(action.expectedBenefitHigh)} modeled midpoint`
+                          : <>
+                              {action.expectedBenefitLow !== null ? formatMoney(action.expectedBenefitLow) : "?"}
+                              {" – "}
+                              {action.expectedBenefitHigh !== null ? formatMoney(action.expectedBenefitHigh) : "?"}
+                            </>
+                        }
+                        {" expected benefit"}
+                      </span>
+                    )}
+                    {action.effortLevel && <EffortBadge effort={action.effortLevel} />}
+                  </div>
+                )
               )}
 
               {action.nextStep && (
@@ -336,17 +351,26 @@ export default function ActionRoiPanel({ actions, compact = false, onStatusChang
                 </p>
               )}
 
-              {(action.protectedValue !== null || action.expectedBenefitHigh !== null) && (
-                <p className="gs-arp-detail-row">
-                  <span className="gs-arp-detail-label">Protected value at stake: </span>
-                  {action.expectedBenefitLow !== null && action.expectedBenefitHigh !== null
-                    ? action.expectedBenefitLow === action.expectedBenefitHigh
-                      ? `${formatMoney(action.expectedBenefitHigh)} point estimate`
-                      : `${formatMoney(action.expectedBenefitLow)}–${formatMoney(action.expectedBenefitHigh)} scenario range`
-                    : action.protectedValue !== null
-                    ? formatMoney(action.protectedValue)
-                    : "—"}
-                </p>
+              {execMode ? (
+                action.execProtected && (
+                  <p className="gs-arp-detail-row">
+                    <span className="gs-arp-detail-label">Protected value: </span>
+                    {action.execProtected}
+                  </p>
+                )
+              ) : (
+                (action.protectedValue !== null || action.expectedBenefitHigh !== null) && (
+                  <p className="gs-arp-detail-row">
+                    <span className="gs-arp-detail-label">Protected value at stake: </span>
+                    {action.expectedBenefitLow !== null && action.expectedBenefitHigh !== null
+                      ? action.expectedBenefitLow === action.expectedBenefitHigh
+                        ? `${formatMoney(action.expectedBenefitHigh)} point estimate`
+                        : `${formatMoney(action.expectedBenefitLow)}–${formatMoney(action.expectedBenefitHigh)} scenario range`
+                      : action.protectedValue !== null
+                      ? formatMoney(action.protectedValue)
+                      : "—"}
+                  </p>
+                )
               )}
             </div>
           ))}

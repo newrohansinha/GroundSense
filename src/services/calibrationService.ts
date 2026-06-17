@@ -1,4 +1,5 @@
 import { supabase } from "../lib/supabase";
+import { isDemoMode } from "./companyService";
 
 export type CompanyCalibrationInput = {
   annual_revenue?: number | null;
@@ -204,19 +205,6 @@ export async function getCalibrationForCompany(companyId: string) {
     .limit(1)
     .maybeSingle();
 
-  console.log("Load calibration companyId:", companyId);
-  console.log("Load calibration raw:", JSON.stringify(data, null, 2));
-  console.log("Load calibration important fields:", {
-    annual_revenue: data?.annual_revenue,
-    steel_spend: data?.steel_spend,
-    steel_import_exposure_pct: data?.steel_import_exposure_pct,
-    freight_spend: data?.freight_spend,
-    freight_contract_coverage_pct: data?.freight_contract_coverage_pct,
-    freight_spot_rate_exposure_pct: data?.freight_spot_rate_exposure_pct,
-    updated_at: data?.updated_at,
-  });
-  console.log("Load calibration error:", error);
-
   if (error) {
     throw error;
   }
@@ -228,6 +216,9 @@ export async function saveCalibrationForCompany(
   companyId: string,
   input: CompanyCalibrationInput
 ) {
+  // Public demo is read-only — never mutate the demo company's calibration.
+  if (isDemoMode()) return null;
+
   const payload = {
     company_id: companyId,
 
@@ -284,18 +275,6 @@ export async function saveCalibrationForCompany(
     updated_at: new Date().toISOString(),
   };
 
-  console.log("Saving calibration companyId:", companyId);
-  console.log("Saving calibration companyId:", companyId);
-console.log("Saving calibration raw payload:", JSON.stringify(payload, null, 2));
-console.log("Saving calibration important fields:", {
-  annual_revenue: payload.annual_revenue,
-  steel_spend: payload.steel_spend,
-  steel_import_exposure_pct: payload.steel_import_exposure_pct,
-  freight_spend: payload.freight_spend,
-  freight_contract_coverage_pct: payload.freight_contract_coverage_pct,
-  freight_spot_rate_exposure_pct: payload.freight_spot_rate_exposure_pct,
-});
-
   const { data, error } = await supabase
     .from("company_calibration")
     .upsert(payload, {
@@ -303,18 +282,6 @@ console.log("Saving calibration important fields:", {
     })
     .select("*")
     .single();
-
-  console.log("Save calibration raw data:", JSON.stringify(data, null, 2));
-console.log("Save calibration important fields:", {
-  annual_revenue: data?.annual_revenue,
-  steel_spend: data?.steel_spend,
-  steel_import_exposure_pct: data?.steel_import_exposure_pct,
-  freight_spend: data?.freight_spend,
-  freight_contract_coverage_pct: data?.freight_contract_coverage_pct,
-  freight_spot_rate_exposure_pct: data?.freight_spot_rate_exposure_pct,
-  updated_at: data?.updated_at,
-});
-  console.log("Save calibration error:", error);
 
   if (error) {
     throw error;

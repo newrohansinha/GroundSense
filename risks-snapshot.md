@@ -1,0 +1,29 @@
+- generic [ref=e3] [box=0,0,1021,2333]:
+  - navigation [ref=e4] [box=0,0,1021,57]:
+    - generic [ref=e5] [box=0,0,1021,56]:
+      - link "GroundSense" [ref=e6] [cursor=pointer] [box=24,18,109,20]:
+        - /url: /dashboard
+        - text: GroundSense
+      - generic [ref=e8] [box=161,14,322,28]:
+        - link "Dashboard" [ref=e9] [cursor=pointer] [box=161,14,93,28]:
+          - /url: /dashboard
+        - link "Calibration" [ref=e10] [cursor=pointer] [box=256,14,93,28]:
+          - /url: /calibration
+        - link "Sources" [ref=e11] [cursor=pointer] [box=351,14,73,28]:
+          - /url: /sources
+        - link "Risks" [ref=e12] [cursor=pointer] [box=427,14,56,28]:
+          - /url: /risks
+      - button "Switch to dark mode" [ref=e13] [cursor=pointer] [box=963,11,34,34]: ☾
+  - main [ref=e14] [box=0,57,1021,2277]:
+    - generic [ref=e15] [box=0,89,1021,2213]:
+      - generic [ref=e17] [box=24,89,576,107]:
+        - paragraph [ref=e18] [box=24,89,576,16]: System of record
+        - heading "Risks" [level=1] [ref=e19] [box=24,111,576,33]
+        - paragraph [ref=e20] [box=24,150,576,20]: Published issues, operating changes, candidate review, and evidence quality.
+        - paragraph [ref=e21] [box=24,176,576,20]: 2 published items · ~$900K total value at stake · 1 operating risk · 1 operating change
+      - generic [ref=e23] [box=24,220,973,2082]:
+        - generic [ref=e24] [box=24,240,973,343]
+        - generic [ref=e55] [box=24,603,973,556]
+        - generic [ref=e103] [box=24,1179,973,520]
+        - generic [ref=e142] [box=24,1719,973,152]
+        - generic [ref=e149] [box=24,1891,973,393]

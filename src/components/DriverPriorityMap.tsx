@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 type DriverRow = {
   key: string;
   name: string;
@@ -17,6 +19,9 @@ type DriverPriorityMapProps = {
   topDriver?: DriverRow | null;
   watchCount?: number;
   publishedIssueCount?: number;
+  execMode?: boolean;
+  // issue title -> executive point-estimate display ("~$145K · Verified public metric + …")
+  execImpactByTitle?: Record<string, string>;
 };
 
 const STATUS_ORDER: Record<DriverRow["status"], number> = {
@@ -52,25 +57,73 @@ function EvidenceDot({ strength }: { strength: DriverRow["evidenceStrength"] }) 
   );
 }
 
-export default function DriverPriorityMap({ drivers, topDriver, watchCount, publishedIssueCount }: DriverPriorityMapProps) {
+// Strip range + scenario wording from driver reason text in executive mode.
+function execReason(text: string | null | undefined, execMode: boolean): string {
+  const t = text ?? "";
+  if (!execMode) return t;
+  return t
+    .replace(/active scenario downside risk with modeled range/gi, "active source-backed operating risk")
+    .replace(/with modeled range/gi, "with a source-backed estimate")
+    .replace(/modeled range/gi, "source-backed estimate")
+    .replace(/scenario downside range/gi, "operating downside")
+    .replace(/active scenario downside risk/gi, "active operating risk")
+    .replace(/scenario downside/gi, "operating downside");
+}
+
+export default function DriverPriorityMap({ drivers, topDriver, watchCount, publishedIssueCount, execMode = false, execImpactByTitle = {} }: DriverPriorityMapProps) {
   const sorted = [...drivers].sort(
     (a, b) => (STATUS_ORDER[a.status] ?? 99) - (STATUS_ORDER[b.status] ?? 99)
   );
+  // Tracks which issues have already shown their dollar estimate (count once per issue).
+  const shownDollarTitles = new Set<string>();
 
-  const counts = {
-    Act: drivers.filter((d) => d.status === "Act").length,
-    Validate: drivers.filter((d) => d.status === "Validate").length,
-    Watch: watchCount ?? drivers.filter((d) => d.status === "Watch").length,
-  };
+  // Executive mode: a driver is a "Support" row when it shares an issue whose dollar estimate
+  // is already carried by an earlier (primary) driver row — so it isn't a separate Act item.
+  const primaryDriverByTitle = new Map<string, string>();
+  for (const d of sorted) {
+    const t = d.relatedIssueTitle ?? "";
+    if (t && execImpactByTitle[t] && !primaryDriverByTitle.has(t)) primaryDriverByTitle.set(t, d.key);
+  }
+  const [showInactive, setShowInactive] = useState(false);
+
+  const isSupportRow = (d: DriverRow) =>
+    execMode && !!d.relatedIssueTitle && !!execImpactByTitle[d.relatedIssueTitle] && primaryDriverByTitle.get(d.relatedIssueTitle) !== d.key;
+  // The primary driver of a published issue that carries a canonical dollar estimate is an
+  // active "Act" item — the canonical published state wins over the flaky per-driver evidence
+  // heuristic (which previously mislabeled freight as Watch/Weak).
+  const isPrimaryActive = (d: DriverRow) =>
+    execMode && !!d.relatedIssueTitle && !!execImpactByTitle[d.relatedIssueTitle] && primaryDriverByTitle.get(d.relatedIssueTitle) === d.key;
+
+  const counts = execMode
+    ? {
+        Act: drivers.filter((d) => isPrimaryActive(d)).length,
+        Support: drivers.filter((d) => isSupportRow(d)).length,
+        Watch: drivers.filter((d) => !isPrimaryActive(d) && !isSupportRow(d) && d.status === "Watch").length,
+      }
+    : {
+        Act: drivers.filter((d) => d.status === "Act").length,
+        Support: 0,
+        Watch: watchCount ?? drivers.filter((d) => d.status === "Watch").length,
+      };
+  const validateCount = drivers.filter((d) => d.status === "Validate" && !isSupportRow(d) && !isPrimaryActive(d)).length;
+
+  // Default view: active (primary/Act/Validate) + support rows only. Inactive behind a toggle.
+  const visibleDrivers = sorted.filter((d) => {
+    const inactive = d.status === "Not active" || d.status === "Ignore";
+    return showInactive || isPrimaryActive(d) || isSupportRow(d) || !inactive;
+  });
+  const inactiveCount = sorted.filter(
+    (d) => (d.status === "Not active" || d.status === "Ignore") && !isPrimaryActive(d) && !isSupportRow(d)
+  ).length;
 
   return (
     <div className="gs-driver-priority-map">
       <style>{`
         .gs-driver-priority-map {
           font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
-          color: #2b2118;
-          background: #fffdf8;
-          border: 1px solid #e7dccd;
+          color: var(--text-primary);
+          background: var(--bg-surface);
+          border: 1px solid var(--border-default);
           border-radius: 18px;
           padding: 20px;
           margin-bottom: 18px;
@@ -87,23 +140,28 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           font-size: 17px;
           font-weight: 700;
           letter-spacing: -0.02em;
-          color: #2b2118;
+          color: var(--text-primary);
         }
         .gs-dpm-subtitle {
           margin: 0;
           font-size: 13px;
-          color: #7a6a5d;
+          color: var(--text-muted);
         }
         .gs-dpm-counts {
           font-size: 13px;
-          color: #7a6a5d;
+          color: var(--text-muted);
           white-space: nowrap;
           flex-shrink: 0;
           padding-top: 2px;
         }
-        .gs-dpm-count-act { color: #2b2118; font-weight: 650; }
-        .gs-dpm-count-validate { color: #5c4e3a; font-weight: 600; }
-        .gs-dpm-count-watch { color: #7a6a5d; }
+        .gs-driver-support-badge {
+          display: inline-block; font-size: 11px; font-weight: 650;
+          padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+          background: var(--support-bg); color: var(--support);
+        }
+        .gs-dpm-count-act { color: var(--text-primary); font-weight: 650; }
+        .gs-dpm-count-validate { color: var(--text-secondary); font-weight: 600; }
+        .gs-dpm-count-watch { color: var(--text-muted); }
         .gs-driver-table {
           width: 100%;
           border-collapse: collapse;
@@ -115,31 +173,31 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           font-weight: 700;
           text-transform: uppercase;
           letter-spacing: 0.06em;
-          color: #7a6a5d;
-          border-bottom: 1px solid #e7dccd;
+          color: var(--text-muted);
+          border-bottom: 1px solid var(--border-default);
           padding: 6px 10px 8px;
         }
         .gs-driver-table th:first-child { padding-left: 0; }
         .gs-driver-table th:last-child { padding-right: 0; }
         .gs-driver-row td {
           padding: 11px 10px;
-          border-bottom: 1px solid #f0e9de;
+          border-bottom: 1px solid var(--bg-surface-muted);
           vertical-align: top;
         }
         .gs-driver-row td:first-child { padding-left: 0; }
         .gs-driver-row td:last-child { padding-right: 0; }
         .gs-driver-row:last-child td { border-bottom: none; }
         .gs-driver-row-inactive td {
-          color: #a8998a;
+          color: var(--text-faint);
         }
         .gs-driver-name {
           font-weight: 620;
-          color: #2b2118;
+          color: var(--text-primary);
           font-size: 14px;
           line-height: 1.3;
         }
         .gs-driver-row-inactive .gs-driver-name {
-          color: #a8998a;
+          color: var(--text-faint);
           font-style: italic;
           font-weight: 500;
         }
@@ -147,42 +205,42 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           display: block;
           margin-top: 3px;
           font-size: 12px;
-          color: #9a8070;
+          color: var(--text-muted);
           font-style: normal;
         }
         .gs-driver-row-inactive .gs-driver-issue-link {
-          color: #b8a898;
+          color: var(--text-faint);
         }
         .gs-driver-impact {
           font-size: 14px;
-          color: #2b2118;
+          color: var(--text-primary);
           white-space: nowrap;
         }
         .gs-driver-row-inactive .gs-driver-impact {
-          color: #a8998a;
+          color: var(--text-faint);
         }
         .gs-driver-quality {
           display: block;
           font-size: 11px;
-          color: #9a8070;
+          color: var(--text-muted);
           margin-top: 2px;
         }
         .gs-driver-reason {
           font-size: 13px;
-          color: #5c4e3a;
+          color: var(--text-secondary);
           line-height: 1.45;
           max-width: 260px;
         }
         .gs-driver-action {
           font-size: 12px;
-          color: #7a5c2b;
+          color: var(--warning);
           line-height: 1.4;
           max-width: 220px;
           font-style: italic;
         }
         .gs-driver-row-inactive .gs-driver-reason,
         .gs-driver-row-inactive .gs-driver-action {
-          color: #a8998a;
+          color: var(--text-faint);
         }
         .gs-status-badge {
           font-size: 12px;
@@ -190,32 +248,32 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           display: inline-block;
           white-space: nowrap;
         }
-        .gs-status-act { color: #1a120b; }
-        .gs-status-validate { color: #5c4e3a; }
-        .gs-status-watch { color: #7a6a5d; }
-        .gs-status-ignore { color: #9a8070; }
-        .gs-status-not-active { color: #b8a898; font-style: italic; font-weight: 500; }
+        .gs-status-act { color: var(--text-primary); }
+        .gs-status-validate { color: var(--text-secondary); }
+        .gs-status-watch { color: var(--text-muted); }
+        .gs-status-ignore { color: var(--text-muted); }
+        .gs-status-not-active { color: var(--text-faint); font-style: italic; font-weight: 500; }
         .gs-evidence-dot {
           font-size: 12px;
           font-weight: 600;
           display: inline-block;
           white-space: nowrap;
         }
-        .gs-evidence-strong { color: #2b6b3a; }
-        .gs-evidence-moderate { color: #7a5c2b; }
-        .gs-evidence-weak { color: #8a4a2a; }
-        .gs-evidence-none { color: #9a8070; font-style: italic; }
+        .gs-evidence-strong { color: var(--success); }
+        .gs-evidence-moderate { color: var(--warning); }
+        .gs-evidence-weak { color: var(--accent-hover); }
+        .gs-evidence-none { color: var(--text-muted); font-style: italic; }
         .gs-dpm-top-driver {
-          background: #f7f1e8;
-          border: 1px solid #e0d3c0;
+          background: var(--bg-surface-muted);
+          border: 1px solid var(--border-default);
           border-radius: 10px;
           padding: 12px 14px;
           margin-bottom: 16px;
           font-size: 13px;
-          color: #5c4e3a;
+          color: var(--text-secondary);
         }
         .gs-dpm-top-driver strong {
-          color: #2b2118;
+          color: var(--text-primary);
           font-size: 14px;
           display: block;
           margin-bottom: 3px;
@@ -225,13 +283,13 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           font-weight: 700;
           text-transform: uppercase;
           letter-spacing: 0.07em;
-          color: #b45309;
+          color: var(--accent-hover);
           margin-bottom: 6px;
         }
         .gs-dpm-top-action {
           margin-top: 6px;
           font-size: 12px;
-          color: #7a5c2b;
+          color: var(--warning);
           font-style: italic;
         }
       `}</style>
@@ -248,7 +306,11 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
         <div className="gs-dpm-counts">
           <span className="gs-dpm-count-act">{counts.Act} Act</span>
           {" · "}
-          <span className="gs-dpm-count-validate">{counts.Validate} Validate</span>
+          {execMode ? (
+            <span className="gs-dpm-count-validate">{counts.Support} Support</span>
+          ) : (
+            <span className="gs-dpm-count-validate">{validateCount} Validate</span>
+          )}
           {" · "}
           <span className="gs-dpm-count-watch">{counts.Watch} Watch</span>
         </div>
@@ -258,7 +320,7 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
         <div className="gs-dpm-top-driver">
           <div className="gs-dpm-top-label">Top priority driver</div>
           <strong>{topDriver.name}</strong>
-          {topDriver.reason}
+          {execReason(topDriver.reason, execMode)}
           {topDriver.recommendedAction && topDriver.recommendedAction !== "—" && (
             <p className="gs-dpm-top-action">→ {topDriver.recommendedAction}</p>
           )}
@@ -277,9 +339,10 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           </tr>
         </thead>
         <tbody>
-          {sorted.map((driver) => {
+          {visibleDrivers.map((driver) => {
+            const primaryActive = isPrimaryActive(driver);
             const isInactive =
-              driver.status === "Not active" || driver.status === "Ignore";
+              !primaryActive && !isSupportRow(driver) && (driver.status === "Not active" || driver.status === "Ignore");
             return (
               <tr
                 key={driver.key}
@@ -294,10 +357,29 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
                   )}
                 </td>
                 <td>
-                  <StatusBadge status={driver.status} />
+                  {isSupportRow(driver) ? (
+                    <span className="gs-driver-support-badge">Support</span>
+                  ) : (
+                    <StatusBadge status={primaryActive ? "Act" : driver.status} />
+                  )}
                 </td>
                 <td>
-                  {driver.estimatedImpact ? (
+                  {execMode ? (
+                    (() => {
+                      const title = driver.relatedIssueTitle ?? "";
+                      const exec = title ? execImpactByTitle[title] : undefined;
+                      // Count each issue's dollar estimate ONCE — on its first (primary) driver row.
+                      if (exec && !shownDollarTitles.has(title)) {
+                        shownDollarTitles.add(title);
+                        return <span className="gs-driver-impact">{exec}</span>;
+                      }
+                      if (exec && shownDollarTitles.has(title)) {
+                        return <span className="gs-driver-impact" style={{ color: "var(--text-muted)" }}>Supporting signal · included in primary estimate</span>;
+                      }
+                      if (driver.estimatedImpact) return <span className="gs-driver-impact" style={{ color: "var(--text-muted)" }}>{driver.estimateQuality || "Supporting signal"}</span>;
+                      return <span className="gs-driver-impact" style={{ color: "var(--text-faint)" }}>—</span>;
+                    })()
+                  ) : driver.estimatedImpact ? (
                     <>
                       <span className="gs-driver-impact">{driver.estimatedImpact}</span>
                       {driver.estimateQuality && (
@@ -305,20 +387,26 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
                       )}
                     </>
                   ) : (
-                    <span className="gs-driver-impact" style={{ color: "#b8a898" }}>—</span>
+                    <span className="gs-driver-impact" style={{ color: "var(--text-faint)" }}>—</span>
                   )}
                 </td>
                 <td>
-                  <EvidenceDot strength={driver.evidenceStrength} />
+                  <EvidenceDot strength={primaryActive && driver.evidenceStrength === "Weak" ? "Strong" : driver.evidenceStrength} />
                 </td>
                 <td>
-                  <span className="gs-driver-reason">{driver.reason}</span>
+                  <span className="gs-driver-reason">
+                    {isSupportRow(driver)
+                      ? "Supporting signal included in tariff validation; no separate dollar estimate."
+                      : primaryActive
+                      ? "Source-backed operating issue with an open validation action."
+                      : execReason(driver.reason, execMode)}
+                  </span>
                 </td>
                 <td>
                   {driver.recommendedAction && driver.recommendedAction !== "—" ? (
                     <span className="gs-driver-action">{driver.recommendedAction}</span>
                   ) : (
-                    <span style={{ color: "#b8a898", fontSize: 13 }}>—</span>
+                    <span style={{ color: "var(--text-faint)", fontSize: 13 }}>—</span>
                   )}
                 </td>
               </tr>
@@ -326,6 +414,16 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           })}
         </tbody>
       </table>
+      {inactiveCount > 0 && (
+        <button
+          type="button"
+          className="text-button"
+          style={{ marginTop: 10, fontSize: 13 }}
+          onClick={() => setShowInactive((v) => !v)}
+        >
+          {showInactive ? "Hide inactive drivers" : `Show inactive drivers (${inactiveCount})`}
+        </button>
+      )}
     </div>
   );
 }

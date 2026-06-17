@@ -1,0 +1,238 @@
+- generic [ref=e3] [box=0,-515,1021,2333]:
+  - navigation [ref=e4] [box=0,0,1021,57]:
+    - generic [ref=e5] [box=0,0,1021,56]:
+      - link "GroundSense" [ref=e6] [cursor=pointer] [box=24,18,109,20]:
+        - /url: /dashboard
+        - text: GroundSense
+      - generic [ref=e8] [box=161,14,322,28]:
+        - link "Dashboard" [ref=e9] [cursor=pointer] [box=161,14,93,28]:
+          - /url: /dashboard
+        - link "Calibration" [ref=e10] [cursor=pointer] [box=256,14,93,28]:
+          - /url: /calibration
+        - link "Sources" [ref=e11] [cursor=pointer] [box=351,14,73,28]:
+          - /url: /sources
+        - link "Risks" [ref=e12] [cursor=pointer] [box=427,14,56,28]:
+          - /url: /risks
+      - button "Switch to dark mode" [ref=e13] [cursor=pointer] [box=963,11,34,34]: ☾
+  - main [ref=e14] [box=0,-459,1021,2277]:
+    - generic [ref=e15] [box=0,-427,1021,2213]:
+      - generic [ref=e17] [box=24,-427,576,107]:
+        - paragraph [ref=e18] [box=24,-427,576,16]: System of record
+        - heading "Risks" [level=1] [ref=e19] [box=24,-405,576,33]
+        - paragraph [ref=e20] [box=24,-366,576,20]: Published issues, operating changes, candidate review, and evidence quality.
+        - paragraph [ref=e21] [box=24,-340,576,20]: 2 published items · ~$900K total value at stake · 1 operating risk · 1 operating change
+      - generic [ref=e23] [box=24,-296,973,2082]:
+        - generic [ref=e24] [box=24,-276,973,343]:
+          - generic [ref=e25] [box=49,-251,923,47]:
+            - generic [ref=e26] [box=49,-251,553,47]:
+              - paragraph [ref=e27] [box=49,-251,553,16]: Reviewed but excluded from executive estimates until evidence improves
+              - heading "Items not promoted" [level=2] [ref=e28] [box=49,-231,553,27]
+            - generic [ref=e30] [box=853,-251,119,29]: 2 pending review
+          - paragraph [ref=e31] [box=49,-188,923,17]: These items were generated but did not pass the evidence quality gate. They are not shown in executive sections until promoted.
+          - generic [ref=e32] [box=49,-159,923,202]:
+            - generic [ref=e33] [box=49,-159,923,95]:
+              - generic [ref=e34] [box=65,-144,890,44]:
+                - generic [ref=e35] [box=65,-144,774,44]
+                - generic [ref=e40] [box=851,-144,104,41]
+              - paragraph [ref=e43] [box=65,-95,890,16]: Copper price signal is broad-market macro — no direct company exposure evidence.
+            - generic [ref=e44] [box=49,-52,923,95]:
+              - generic [ref=e45] [box=65,-37,890,44]:
+                - generic [ref=e46] [box=65,-37,774,44]
+                - generic [ref=e51] [box=851,-37,104,41]
+              - paragraph [ref=e54] [box=65,12,890,16]: Partial evidence alignment (33%). Missing direct demand signal.
+        - generic [ref=e55] [box=24,88,973,556]:
+          - generic [ref=e56] [box=49,112,923,47]:
+            - generic [ref=e57] [box=49,112,131,47]:
+              - paragraph [ref=e58] [box=49,112,131,16]: System of record
+              - heading "Risk Register" [level=2] [ref=e59] [box=49,132,131,27]
+            - generic [ref=e60] [box=779,112,193,29]:
+              - generic [ref=e61] [box=779,112,106,29]: 1 risk · ~$150K
+              - button "Expand all" [ref=e62] [cursor=pointer] [box=895,116,77,21]
+          - generic [ref=e63] [box=49,177,923,442]:
+            - generic [ref=e64] [box=49,196,923,65]:
+              - generic [ref=e65] [box=49,196,724,65]:
+                - generic [ref=e66] [box=49,196,724,26]
+                - heading "Container Freight Rates Surge Amidst Geopolitical Tensions and Peak Season Demand" [level=3] [ref=e70] [box=49,230,724,23]
+              - button "View analysis →" [ref=e71] [cursor=pointer] [box=854,196,118,21]
+            - generic [ref=e72] [box=49,272,923,72]:
+              - generic [ref=e73] [box=49,272,298,72]:
+                - generic [ref=e74] [box=59,283,277,16]
+                - generic [ref=e77] [box=59,305,277,19]: 72/100
+              - generic [ref=e78] [box=361,272,298,72]:
+                - generic [ref=e79] [box=372,283,277,16]
+                - generic [ref=e82] [box=372,305,277,19]: 80%
+              - generic [ref=e83] [box=674,272,298,72]:
+                - generic [ref=e84] [box=684,283,277,16]
+                - generic [ref=e87] [box=684,305,277,19]: ~$150K
+            - generic [ref=e88] [box=49,358,923,146]:
+              - generic [ref=e89] [box=63,371,894,16]:
+                - generic [ref=e90] [box=63,371,252,16]: Verified public metric + company calibration
+                - generic [ref=e91] [box=327,371,101,15]: "Confidence: Medium"
+              - paragraph [ref=e92] [box=63,395,894,18]:
+                - strong [ref=e93] [box=63,395,69,17]: "Calculation:"
+                - text: $27.0M freight spend × 67% spot exposure × 0.8% BLS freight/logistics PPI move
+              - paragraph [ref=e94] [box=63,418,894,16]:
+                - strong [ref=e95] [box=63,418,47,16]: "Sources:"
+                - text: External — BLS Freight Transportation Arrangement PPI (2026-05-01) · Internal — Calibrated freight lane data
+              - paragraph [ref=e96] [box=63,440,894,15]: Public logistics PPI support; lane-specific freight index not configured — not a lane-verified freight rate.
+              - button "▼ Show methodology / sensitivity" [ref=e98] [cursor=pointer] [box=63,474,193,16]
+            - paragraph [ref=e99] [box=49,512,923,45]: Freight markets are tightening due to geopolitical disruption, congestion, carrier surcharges, and peak-season demand. Public logistics data supports current price pressure, while lane-specific freight-rate validation remains pending.
+            - generic [ref=e100] [box=49,563,923,56]:
+              - generic [ref=e101] [box=61,571,120,16]: Decision trigger
+              - generic [ref=e102] [box=189,571,770,39]: Escalate if spot-exposed freight spend exceeds 20% of total freight spend, new surcharges are announced on top-volume inbound lanes, or spot rates on key lanes rise more than 5% month-over-month.
+        - generic [ref=e103] [box=24,664,973,520]:
+          - generic [ref=e104] [box=49,688,923,47]:
+            - generic [ref=e105] [box=49,688,206,47]:
+              - paragraph [ref=e106] [box=49,688,206,16]: Policy / operating changes
+              - heading "Operating Changes" [level=2] [ref=e107] [box=49,708,206,27]
+            - generic [ref=e108] [box=774,688,198,29]:
+              - generic [ref=e109] [box=774,688,111,29]: 1 item · ~$750K
+              - button "Expand all" [ref=e110] [cursor=pointer] [box=895,692,77,21]
+          - generic [ref=e111] [box=49,753,923,406]:
+            - generic [ref=e112] [box=49,772,923,61]:
+              - generic [ref=e113] [box=49,772,556,61]:
+                - generic [ref=e114] [box=49,772,556,23]
+                - heading "US Steel Tariffs Bolster Domestic Production Amid Import Decline" [level=3] [ref=e117] [box=49,802,556,23]
+              - button "View analysis →" [ref=e118] [cursor=pointer] [box=854,772,118,21]
+            - generic [ref=e119] [box=49,845,923,72]:
+              - generic [ref=e120] [box=49,845,455,72]:
+                - generic [ref=e121] [box=59,855,433,16]
+                - generic [ref=e124] [box=59,877,433,19]: ~$750K
+              - generic [ref=e125] [box=517,845,455,72]:
+                - generic [ref=e127] [box=528,855,60,14]: Confidence
+                - generic [ref=e128] [box=528,876,433,19]: Medium-high
+            - generic [ref=e129] [box=49,931,923,110]:
+              - generic [ref=e130] [box=63,943,894,16]:
+                - generic [ref=e131] [box=63,943,336,16]: Verified manual tariff metric + supplier-grounded exposure
+                - generic [ref=e132] [box=411,944,127,15]: "Confidence: Medium-high"
+              - paragraph [ref=e133] [box=63,967,894,18]:
+                - strong [ref=e134] [box=63,968,69,17]: "Calculation:"
+                - text: $37.6M steel-linked import exposure × 20% unpassed exposure × 10 percentage-point tariff-rate reduction
+              - paragraph [ref=e135] [box=63,991,894,16]:
+                - strong [ref=e136] [box=63,991,47,16]: "Sources:"
+                - text: External — Manual structured tariff metric, 25% → 15%, USITC HTS / Federal Register · Internal — Imported supplier / procurement data, 5 supplier rows
+              - paragraph [ref=e137] [box=63,1013,894,15]: Realized savings depend on supplier landed-cost updates, open PO timing, and country-of-origin validation.
+            - paragraph [ref=e138] [box=49,1049,923,67]: The verified tariff metric (25% → 15%) applies to steel-linked import exposure, creating potential procurement relief. Aluminum and copper require separate tariff metrics or supplier validation before being independently quantified. Procurement should validate supplier country-of-origin, import-category exposure, and landed-cost assumptions before treating relief as realized.
+            - generic [ref=e139] [box=49,1122,923,37]:
+              - generic [ref=e140] [box=61,1130,120,16]: Decision trigger
+              - generic [ref=e141] [box=189,1130,625,20]: Validate savings if steel-linked imports exceed $10M or suppliers have not updated landed-cost assumptions.
+        - generic [ref=e142] [box=24,1203,973,152]:
+          - generic [ref=e143] [box=49,1228,923,47]:
+            - generic [ref=e144] [box=49,1228,127,47]:
+              - paragraph [ref=e145] [box=49,1228,127,16]: Evidence quality
+              - heading "Quality Gate" [level=2] [ref=e146] [box=49,1248,127,27]
+            - generic [ref=e147] [box=889,1228,83,29]: 2 in review
+          - paragraph [ref=e148] [box=49,1291,923,40]: 2 published · 2 pending review · 0 quarantined. Blocked candidates are excluded from executive estimates, actions, and forecasts until promoted.
+        - generic [ref=e149] [box=24,1375,973,393]:
+          - generic [ref=e151] [box=49,1400,505,71]:
+            - paragraph [ref=e152] [box=49,1400,505,16]: Automation audit
+            - heading "Intelligence Run History" [level=2] [ref=e153] [box=49,1420,505,27]
+            - paragraph [ref=e154] [box=49,1451,505,20]: Every manual and scheduled intelligence update, with counts and outcomes.
+          - table [ref=e156] [box=49,1487,1014,241]:
+            - rowgroup [ref=e157] [box=49,1487,1014,26]:
+              - row "Started Trigger Status Duration Sources Obs Shocks Generated Published Review Quar. Active actions Brief Note" [ref=e158] [box=49,1487,1014,26]:
+                - columnheader "Started" [ref=e159] [box=49,1487,118,26]
+                - columnheader "Trigger" [ref=e160] [box=166,1487,78,26]
+                - columnheader "Status" [ref=e161] [box=245,1487,93,26]
+                - columnheader "Duration" [ref=e162] [box=337,1487,76,26]
+                - columnheader "Sources" [ref=e163] [box=413,1487,68,26]
+                - columnheader "Obs" [ref=e164] [box=481,1487,41,26]
+                - columnheader "Shocks" [ref=e165] [box=522,1487,62,26]
+                - columnheader "Generated" [ref=e166] [box=584,1487,82,26]
+                - columnheader "Published" [ref=e167] [box=666,1487,79,26]
+                - columnheader "Review" [ref=e168] [box=744,1487,60,26]
+                - columnheader "Quar." [ref=e169] [box=805,1487,53,26]
+                - columnheader "Active actions" [ref=e170] [box=858,1487,107,26]
+                - columnheader "Brief" [ref=e171] [box=965,1487,49,26]
+                - columnheader "Note" [ref=e172] [box=1014,1487,48,26]
+            - rowgroup [ref=e173] [box=49,1512,1014,216]:
+              - row "Jun 14, 10:23 AM manual running — 0 0 0 0 0 0 0 0 —" [ref=e174] [box=49,1512,1014,36]:
+                - cell "Jun 14, 10:23 AM" [ref=e175] [box=49,1512,118,36]
+                - cell "manual" [ref=e176] [box=166,1512,78,36]
+                - cell "running" [ref=e177] [box=245,1512,93,36]
+                - cell "—" [ref=e178] [box=337,1512,76,36]
+                - cell "0" [ref=e179] [box=413,1512,68,36]
+                - cell "0" [ref=e180] [box=481,1512,41,36]
+                - cell "0" [ref=e181] [box=522,1512,62,36]
+                - cell "0" [ref=e182] [box=584,1512,82,36]
+                - cell "0" [ref=e183] [box=666,1512,79,36]
+                - cell "0" [ref=e184] [box=744,1512,60,36]
+                - cell "0" [ref=e185] [box=805,1512,53,36]
+                - cell "0" [ref=e186] [box=858,1512,107,36]
+                - cell "—" [ref=e187] [box=965,1512,49,36]
+                - cell [ref=e188] [box=1014,1512,48,36]
+              - row "Jun 14, 06:00 AM scheduled completed 6s 9 0 0 0 0 0 0 0 ✓" [ref=e189] [box=49,1548,1014,36]:
+                - cell "Jun 14, 06:00 AM" [ref=e190] [box=49,1548,118,36]
+                - cell "scheduled" [ref=e191] [box=166,1548,78,36]
+                - cell "completed" [ref=e192] [box=245,1548,93,36]
+                - cell "6s" [ref=e193] [box=337,1548,76,36]
+                - cell "9" [ref=e194] [box=413,1548,68,36]
+                - cell "0" [ref=e195] [box=481,1548,41,36]
+                - cell "0" [ref=e196] [box=522,1548,62,36]
+                - cell "0" [ref=e197] [box=584,1548,82,36]
+                - cell "0" [ref=e198] [box=666,1548,79,36]
+                - cell "0" [ref=e199] [box=744,1548,60,36]
+                - cell "0" [ref=e200] [box=805,1548,53,36]
+                - cell "0" [ref=e201] [box=858,1548,107,36]
+                - cell "✓" [ref=e202] [box=965,1548,49,36]
+                - cell [ref=e203] [box=1014,1548,48,36]
+              - row "Jun 13, 09:48 PM manual completed 13m 17s 0 0 0 0 2 0 0 2 —" [ref=e204] [box=49,1584,1014,36]:
+                - cell "Jun 13, 09:48 PM" [ref=e205] [box=49,1584,118,36]
+                - cell "manual" [ref=e206] [box=166,1584,78,36]
+                - cell "completed" [ref=e207] [box=245,1584,93,36]
+                - cell "13m 17s" [ref=e208] [box=337,1584,76,36]
+                - cell "0" [ref=e209] [box=413,1584,68,36]
+                - cell "0" [ref=e210] [box=481,1584,41,36]
+                - cell "0" [ref=e211] [box=522,1584,62,36]
+                - cell "0" [ref=e212] [box=584,1584,82,36]
+                - cell "2" [ref=e213] [box=666,1584,79,36]
+                - cell "0" [ref=e214] [box=744,1584,60,36]
+                - cell "0" [ref=e215] [box=805,1584,53,36]
+                - cell "2" [ref=e216] [box=858,1584,107,36]
+                - cell "—" [ref=e217] [box=965,1584,49,36]
+                - cell [ref=e218] [box=1014,1584,48,36]
+              - row "Jun 13, 06:35 PM manual completed 10m 32s 0 0 0 0 2 0 0 2 —" [ref=e219] [box=49,1620,1014,36]:
+                - cell "Jun 13, 06:35 PM" [ref=e220] [box=49,1620,118,36]
+                - cell "manual" [ref=e221] [box=166,1620,78,36]
+                - cell "completed" [ref=e222] [box=245,1620,93,36]
+                - cell "10m 32s" [ref=e223] [box=337,1620,76,36]
+                - cell "0" [ref=e224] [box=413,1620,68,36]
+                - cell "0" [ref=e225] [box=481,1620,41,36]
+                - cell "0" [ref=e226] [box=522,1620,62,36]
+                - cell "0" [ref=e227] [box=584,1620,82,36]
+                - cell "2" [ref=e228] [box=666,1620,79,36]
+                - cell "0" [ref=e229] [box=744,1620,60,36]
+                - cell "0" [ref=e230] [box=805,1620,53,36]
+                - cell "2" [ref=e231] [box=858,1620,107,36]
+                - cell "—" [ref=e232] [box=965,1620,49,36]
+                - cell [ref=e233] [box=1014,1620,48,36]
+              - row "Jun 13, 06:19 PM manual completed 12m 5s 0 0 0 0 3 0 0 2 —" [ref=e234] [box=49,1656,1014,36]:
+                - cell "Jun 13, 06:19 PM" [ref=e235] [box=49,1656,118,36]
+                - cell "manual" [ref=e236] [box=166,1656,78,36]
+                - cell "completed" [ref=e237] [box=245,1656,93,36]
+                - cell "12m 5s" [ref=e238] [box=337,1656,76,36]
+                - cell "0" [ref=e239] [box=413,1656,68,36]
+                - cell "0" [ref=e240] [box=481,1656,41,36]
+                - cell "0" [ref=e241] [box=522,1656,62,36]
+                - cell "0" [ref=e242] [box=584,1656,82,36]
+                - cell "3" [ref=e243] [box=666,1656,79,36]
+                - cell "0" [ref=e244] [box=744,1656,60,36]
+                - cell "0" [ref=e245] [box=805,1656,53,36]
+                - cell "2" [ref=e246] [box=858,1656,107,36]
+                - cell "—" [ref=e247] [box=965,1656,49,36]
+                - cell [ref=e248] [box=1014,1656,48,36]
+              - row "Jun 13, 02:49 PM manual completed 14m 19s 0 0 0 0 0 0 0 0 —" [ref=e249] [box=49,1692,1014,36]:
+                - cell "Jun 13, 02:49 PM" [ref=e250] [box=49,1692,118,36]
+                - cell "manual" [ref=e251] [box=166,1692,78,36]
+                - cell "completed" [ref=e252] [box=245,1692,93,36]
+                - cell "14m 19s" [ref=e253] [box=337,1692,76,36]
+                - cell "0" [ref=e254] [box=413,1692,68,36]
+                - cell "0" [ref=e255] [box=481,1692,41,36]
+                - cell "0" [ref=e256] [box=522,1692,62,36]
+                - cell "0" [ref=e257] [box=584,1692,82,36]
+                - cell "0" [ref=e258] [box=666,1692,79,36]
+                - cell "0" [ref=e259] [box=744,1692,60,36]
+                - cell "0" [ref=e260] [box=805,1692,53,36]
+                - cell "0" [ref=e261] [box=858,1692,107,36]
+                - cell "—" [ref=e262] [box=965,1692,49,36]
+                - cell [ref=e263] [box=1014,1692,48,36]
