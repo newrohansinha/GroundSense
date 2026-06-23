@@ -334,7 +334,10 @@ export function getWatchlistUpgradeTrigger(issue: IssueLike): string {
 export function getForecastSummary(issue: IssueLike): string {
   if (isMetricBacked(issue)) {
     const f = (issue.methodology as Record<string, unknown> | null | undefined)?.formula;
-    if (typeof f === "string" && f) return f;
+    // Display-only diesel sign clarity (matches the card/audit surfaces).
+    if (typeof f === "string" && f) return /fuel-exposed freight/i.test(f)
+      ? f.replace(/_/g, " ").replace(/×\s*\+?(\d+(?:\.\d+)?)\s*%/i, "× diesel decrease $1%").replace(/=\s*(\$\S+)\s*$/i, "= ~$1 relief")
+      : f;
     return String(issue.business_impact || issue.exposure_interpretation || issue.risk_title || issue.title || "");
   }
   if (isFreightIssue(issue)) {

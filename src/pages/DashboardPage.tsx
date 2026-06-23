@@ -71,6 +71,7 @@ import {
   EXECUTIVE_POINT_ESTIMATE_MODE,
   getExecutiveImpactEstimate,
   formatExecutiveEstimate,
+  formatFormulaForDisplay,
   sumExecutiveEstimates,
   type ExecutiveEstimate,
 } from "../services/executive/executiveImpactViewModel";
@@ -522,6 +523,9 @@ export default function DashboardPage({ view = "dashboard" }: { view?: "dashboar
   );
   const [, setConnections] = useState<CompanyConnection[]>([]);
 const [impactPaths, setImpactPaths] = useState<ImpactPath[]>([]);
+// DB-backed persisted calibration coverage (company_calibration_coverage). Buyer
+// trust metric — NOT the localStorage workbench.
+const [persistedCoverage, setPersistedCoverage] = useState<{ coverage_pct: number; domains_populated: number; domains_total: number; inputs_calibrated: number | null; inputs_required: number | null; source: string } | null>(null);
 const [calibration, setCalibration] = useState<CompanyCalibrationInput | null>(null);
 const [workbenchCalibration, setWorkbenchCalibration] = useState<CompanyCalibrationInput | null>(null);
 const [verifiedShocks, setVerifiedShocks] = useState<VerifiedShockRow[]>([]);
@@ -745,10 +749,28 @@ const matchedConnectionMap = await loadMatchedConnectionsByItemId(
   ]
 );
 setMatchedConnectionsByItemId(matchedConnectionMap);
+    // DB-backed formula-input provenance + persisted calibration coverage (trust foundation).
+    // Provenance is attached per issue so the UI reads persisted source data, not view heuristics.
+    let provByIssue = new Map<string, any[]>();
+    try {
+      const [{ data: prov }, { data: cov }] = await Promise.all([
+        supabase.from("formula_input_provenance").select("*").eq("company_id", latestCompany.id),
+        supabase.from("company_calibration_coverage").select("*").eq("company_id", latestCompany.id).maybeSingle(),
+      ]);
+      for (const p of (prov ?? []) as any[]) {
+        const a = provByIssue.get(p.issue_id) ?? [];
+        a.push(p);
+        provByIssue.set(p.issue_id, a);
+      }
+      setPersistedCoverage((cov as any) ?? null);
+    } catch {
+      setPersistedCoverage(null);
+    }
+
     setEntities(entityResult.data || []);
     setEvents(eventResult.data || []);
     setAssessments(assessmentResult.data || []);
-    setRisks(riskResult.data || []);
+    setRisks(((riskResult.data || []) as any[]).map((r) => ({ ...r, formula_provenance: provByIssue.get(r.id) ?? [] })));
     setOpportunities(opportunityResult.data || []);
     setBrief(briefResult.data?.[0] || null);
     setActions(actionResult.data || []);
@@ -1079,7 +1101,8 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   function getMovement(
     title: string,
     snapshots: Snapshot[],
-    field: "risk_title" | "opportunity_title"
+    field: "risk_title" | "opportunity_title",
+    createdAt?: string | null
   ) {
     const matching = snapshots
       .filter((snapshot) => snapshot[field] === title)
@@ -1089,7 +1112,15 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
           new Date(a.snapshot_week).getTime()
       );
 
-    if (matching.length < 2) return "New";
+    if (matching.length < 2) {
+      // Age-aware: "New" only when first detected within the last 7 days; older
+      // first-seen items are "Existing", never perpetually "New".
+      if (createdAt) {
+        const ageDays = (Date.now() - new Date(createdAt).getTime()) / 86_400_000;
+        if (Number.isFinite(ageDays)) return ageDays <= 7 ? "New" : "Existing";
+      }
+      return "Existing";
+    }
 
     const current = matching[0].priority_score || 0;
     const previous = matching[1].priority_score || 0;
@@ -1224,7 +1255,38 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   const effectiveCalibration = (calibration || workbenchCalibration)
     ? ({ ...(calibration ?? {}), ...(workbenchCalibration ?? {}) } as CompanyCalibrationInput)
     : null;
+  // ── Calibration: three distinct concepts (never conflated) ───────────────────
+  // 1) Local workbench coverage — localStorage/import state ONLY (browser-specific).
   const calibrationCoverage = calibrationController.workbench.summary.modelReliability;
+  const calInputsCalibrated = calibrationController.workbench.summary.inputsCalibrated;
+  const calInputsRequired = calibrationController.workbench.summary.inputsRequired;
+  const localWorkbenchLoaded = calInputsCalibrated > 0 || calibrationCoverage > 0;
+
+  // 2) Published-issue INPUT coverage — DB-backed reality: do the published issues
+  //    each carry a complete formula + company inputs? This is the buyer-facing
+  //    calibration signal and does NOT depend on the local workbench.
+  const publishedIssuesForCoverage = [...riskItems, ...operatingChanges];
+  const publishedWithInputs = publishedIssuesForCoverage.filter((r) => {
+    const fi = (r as any).formula_inputs;
+    return Boolean(
+      (r as any).formula ||
+        ((r as any).methodology && (r as any).methodology.formula) ||
+        (fi && typeof fi === "object" && Object.keys(fi).length > 0)
+    );
+  }).length;
+  const publishedTotal = publishedIssuesForCoverage.length;
+
+  // 3) Calibration data-source label for the buyer KPI. Prefer the PERSISTED,
+  //    DB-backed coverage (company_calibration_coverage) — stable across browsers.
+  //    Only fall back to demo / local-workbench labels when no persisted record
+  //    exists. localStorage state is never presented as company-wide truth.
+  const calibrationSourceLabel = persistedCoverage
+    ? `All-model calibration coverage: ${persistedCoverage.coverage_pct}% · ${persistedCoverage.domains_populated}/${persistedCoverage.domains_total} domains (DB-backed)`
+    : isDemoMode()
+      ? "Demo calibration available"
+      : localWorkbenchLoaded
+        ? `Local workbench coverage: ${calibrationCoverage}% (${calInputsCalibrated}/${calInputsRequired} inputs)`
+        : "Local calibration workbench not loaded in this browser";
 
   // Labeled calibrated-exposure overlay (Part 8) — recomputed from imported rows,
   // shown alongside (never replacing) the stored evidence-backed/scenario values.
@@ -2144,20 +2206,21 @@ function riskExposureSubtitle() {
           />
 
           <Metric
-            title="Calibration Coverage"
-            value={`${calibrationCoverage}%`}
-            subtitle={`${calibrationController.workbench.summary.inputsCalibrated} of ${calibrationController.workbench.summary.inputsRequired} required inputs calibrated`}
+            title="Published issue coverage"
+            value={`${publishedWithInputs}/${publishedTotal}`}
+            subtitle={`${publishedWithInputs === publishedTotal ? "All published issues have complete formula inputs" : `${publishedWithInputs} of ${publishedTotal} published issues have complete formula inputs`} · ${calibrationSourceLabel}${watchlistItems.length > 0 ? ` · ${watchlistItems.length} watchlist item${watchlistItems.length === 1 ? "" : "s"} blocked by missing data` : ""}`}
             explanation={{
-              title: "Calibration Coverage",
-              displayedValue: `${calibrationCoverage}%`,
-              formula: "Weighted reliability across freight, supplier, CRM, financial, inventory, competitive, and outcome calibration domains.",
+              title: "Published issue input coverage (three distinct concepts)",
+              displayedValue: `${publishedWithInputs}/${publishedTotal} published issues have a complete formula + company inputs`,
+              formula: "Published issue input coverage = published issues with a complete formula and company inputs. It is NOT the local calibration workbench score.",
               inputs: [
-                { label: "Imported data sources", value: String(calibrationController.workbench.summary.importedDataSources) },
-                { label: "Inferred assumptions remaining", value: String(calibrationController.workbench.summary.inferredAssumptions) },
-                { label: "Estimates improved by data", value: String(calibrationController.workbench.summary.estimatesImproved) },
+                { label: "Published issue input coverage", value: `${publishedWithInputs}/${publishedTotal} (DB-backed)` },
+                { label: "Calibration source", value: calibrationSourceLabel },
+                { label: "Local workbench coverage", value: localWorkbenchLoaded ? `${calibrationCoverage}% · ${calInputsCalibrated}/${calInputsRequired} inputs` : "not loaded in this browser" },
+                { label: "Watchlist blocked by missing data", value: String(watchlistItems.length) },
               ],
-              source: "Calibration Center workbench — company-provided freight, supplier, CRM, financial, and outcome data.",
-              note: "Higher coverage means fewer inferred assumptions and tighter, more defensible exposure estimates. Upload data in the Calibration Center to raise this score.",
+              source: "Published issue inputs come from the published issues' stored formula inputs (DB). Local workbench coverage is a browser-specific import state in the Calibration Center.",
+              note: "Published issue input coverage reflects the issues you see; it does not depend on the local browser workbench. Local workbench coverage only rises when you import data in this browser.",
             }}
           />
         </section>
@@ -2293,7 +2356,7 @@ function riskExposureSubtitle() {
                   displayRank={index + 1}
                   expanded={expandedRiskIds.has(risk.id)}
                   onToggle={() => toggleRiskId(risk.id)}
-                  movement={getMovement(risk.risk_title, riskSnapshots, "risk_title")}
+                  movement={getMovement(risk.risk_title, riskSnapshots, "risk_title", (risk as any).created_at)}
                   matchedConnections={matchedConnectionsByItemId[risk.id] || []}
                   calibration={effectiveCalibration}
                   calibratedKeys={calibratedKeys}
@@ -2373,7 +2436,7 @@ function riskExposureSubtitle() {
                 opportunity={opportunity}
                 expanded={expandedOpportunityIds.has(opportunity.id)}
                 onToggle={() => toggleOpportunityId(opportunity.id)}
-                movement={getMovement(opportunity.title, opportunitySnapshots, "opportunity_title")}
+                movement={getMovement(opportunity.title, opportunitySnapshots, "opportunity_title", (opportunity as any).created_at)}
                 matchedConnections={matchedConnectionsByItemId[opportunity.id] || []}
               />
             ))
@@ -2435,7 +2498,7 @@ function riskExposureSubtitle() {
         <>
           <div id="support">
             {/* Calibration Summary — compact status; full workbench lives at /calibration */}
-            <CalibrationSummaryCard controller={calibrationController} publishedCount={riskItems.length + operatingChanges.length} watchlistBlocked={watchlistItems.length} />
+            <CalibrationSummaryCard controller={calibrationController} publishedCount={riskItems.length + operatingChanges.length} watchlistBlocked={watchlistItems.length} dbCoverage={persistedCoverage} />
 
             {/* Source Coverage — free/public external data powering verified shocks */}
             <SourceCoverageCard companyId={company?.id ?? null} />
@@ -2702,6 +2765,17 @@ function CompactMemoSection({
   const watchCount = watchlistItems.length;
   const generatedShown = publishedCount + watchCount + candidateQueueCount;
 
+  // Brief staleness: any issue updated after the brief was generated means the brief
+  // may no longer reflect the register. Buyers see the warning; only operators can regenerate.
+  const briefStale = (() => {
+    if (!brief?.created_at) return false;
+    const briefTime = new Date(brief.created_at).getTime();
+    return [...riskItems, ...operatingChanges, ...watchlistItems].some((r) => {
+      const u = (r as any).last_updated || (r as any).updated_at || (r as any).created_at;
+      return u && new Date(u).getTime() > briefTime + 60_000;
+    });
+  })();
+
   // Executive memo lines — derived from this company's actual published rows.
   const execMemoLines = buildExecMemoLines({
     execTotalRisk,
@@ -2734,14 +2808,21 @@ function CompactMemoSection({
     <section className="card memo-section">
       <div className="card-header">
         <div>
-          <h2 className="section-title">{brief?.title || "Intelligence Summary"}</h2>
+          <h2 className="section-title">{brief ? (briefStale ? "Last generated brief" : (brief.title || "Intelligence Summary")) : "Intelligence Summary"}</h2>
+          {brief && briefStale && <p className="dashboard-subtitle" style={{ margin: "2px 0 0" }}>Not the current live summary — see warning below.</p>}
         </div>
         {brief ? (
-          <span className="badge">{new Date(brief.created_at).toLocaleString()}</span>
+          <span className="badge">Last generated: {new Date(brief.created_at).toLocaleString()}</span>
         ) : (
           <span className="badge">Executive brief preview</span>
         )}
       </div>
+
+      {brief && briefStale && (
+        <p className="memo-stale-note">
+          ⚠ Brief may be stale — issues changed after it was generated.{canViewAdminControls() ? " Regenerate it from the toolbar." : " Regenerate in operator mode."}
+        </p>
+      )}
 
       {!briefExpanded ? (
         <div className="memo-compact memo-coo-format">
@@ -3011,7 +3092,7 @@ function QualityGateReport({ gateResult, confidence = 0, metricBacked = false }:
   const why = floored
     ? "official metric-backed estimate; alignment heuristic understates numeric-shock issues"
     : gateResult.forecastEligible
-    ? "verified external source + company exposure + actionability"
+    ? "official metric source + company exposure + actionability"
     : "evidence aligned and company-relevant; forecast pending validation";
   return (
     <div style={{ borderTop: "1px solid var(--border-default)", marginTop: 12, paddingTop: 10 }}>
@@ -3172,6 +3253,7 @@ function RiskCard({
             <span className="exec-estimate-conf">Confidence: {execEstimate.confidence}</span>
           </div>
           {execEstimate.calculation && <p className="exec-estimate-calc"><strong>Calculation:</strong> {execEstimate.calculation}</p>}
+          {inlineProvenanceText(risk) && <p className="exec-estimate-calc" style={{ color: "var(--text-muted)" }}><strong>Input provenance:</strong> {inlineProvenanceText(risk)}</p>}
           {execEstimate.sources.length > 0 && (
             <p className="exec-estimate-sources"><strong>Sources:</strong> {execEstimate.sources.map((s) => `${s.label} — ${s.value}`).join(" · ")}</p>
           )}
@@ -3337,6 +3419,14 @@ function OperatingChangeCard({
           {execEstimate!.calculation && (
             <p className="exec-estimate-calc"><strong>Calculation:</strong> {execEstimate!.calculation}</p>
           )}
+          {inlineProvenanceText(risk) && (
+            <p className="exec-estimate-calc" style={{ color: "var(--text-muted)" }}><strong>Input provenance:</strong> {inlineProvenanceText(risk)}</p>
+          )}
+          {/fuel-exposed freight|diesel|fuel-surcharge/i.test(`${execEstimate!.calculation ?? ""} ${risk.risk_title}`) && (
+            <p className="exec-estimate-calc" style={{ color: "var(--text-muted)" }}>
+              <strong>Base note:</strong> fuel-exposed freight includes surchargeable fuel-sensitive lanes and may differ from the spot-exposed freight used in the Freight PPI issue. Source: demo calibration assumption.
+            </p>
+          )}
           {execEstimate!.sources.length > 0 && (
             <p className="exec-estimate-sources"><strong>Sources:</strong> {execEstimate!.sources.map((s) => `${s.label} — ${s.value}`).join(" · ")}</p>
           )}
@@ -3405,11 +3495,12 @@ function WatchlistCard({
         <div className="watchlist-compact-left">
           <div className="record-badge-row">
             <span className="gray-badge">Watchlist</span>
-            {/* Signal confidence — NOT a business-impact confidence (the item is unsized). */}
-            <span className="watchlist-confidence-chip">Signal confidence {clampPercent(risk.confidence)}%</span>
+            {/* Source-signal confidence — NOT business-impact confidence (item is unsized). */}
+            <span className="watchlist-confidence-chip">Source signal confidence {clampPercent(risk.confidence)}%</span>
             <span className="direction-chip direction-chip-sm">{formatIssueDirection(risk.issue_direction || "uncertain")}</span>
             <span className="watchlist-unsized-chip">Unsized directional signal</span>
           </div>
+          <p className="watchlist-signal-note">Not impact confidence; this signal is unsized until required company inputs are calibrated.</p>
           <h3 className="watchlist-compact-title">{risk.risk_title}</h3>
           <p className="watchlist-compact-body">{watchlistExplanation}</p>
           {upgradeText && !expanded && (
@@ -3831,19 +3922,19 @@ function DetailPanel({
           {overviewContent?.whatChanged && (
             <div className="analysis-overview-row">
               <span className="analysis-ov-label">{overviewContent.modelNote ? "Market context" : "What changed"}</span>
-              <span className="analysis-ov-text">{overviewContent.whatChanged}</span>
+              <span className="analysis-ov-text">{officializeText(overviewContent.whatChanged)}</span>
             </div>
           )}
           {overviewContent?.whyNow && (
             <div className="analysis-overview-row">
               <span className="analysis-ov-label">Why now</span>
-              <span className="analysis-ov-text">{overviewContent.whyNow}</span>
+              <span className="analysis-ov-text">{officializeText(overviewContent.whyNow)}</span>
             </div>
           )}
           {overviewContent?.businessImpact && (
             <div className="analysis-overview-row">
               <span className="analysis-ov-label">Business impact</span>
-              <span className="analysis-ov-text">{overviewContent.businessImpact}</span>
+              <span className="analysis-ov-text">{officializeText(overviewContent.businessImpact)}</span>
             </div>
           )}
 
@@ -3856,12 +3947,23 @@ function DetailPanel({
             )}
           </div>
 
-          {issueForPath && "risk_title" in issueForPath && (issueForPath as Risk).issue_category && (
-            <div className="analysis-overview-row" style={{ marginTop: 8 }}>
-              <span className="analysis-ov-label">Driver category</span>
-              <span className="analysis-ov-text">{String((issueForPath as Risk).issue_category || "").replace(/_/g, " ")}</span>
-            </div>
-          )}
+          {(() => {
+            if (!issueForPath || !("risk_title" in issueForPath)) return null;
+            // Buyer: "Exposure driver" with a useful driver label (risk_type / driver_template),
+            // never the bare "risk" category. Operator keeps the raw "Driver category".
+            const raw = String(
+              (issueForPath as any).risk_type ||
+              ((issueForPath as any).methodology && (issueForPath as any).methodology.driver_template) ||
+              (issueForPath as Risk).issue_category || ""
+            ).replace(/_/g, " ").trim();
+            if (!raw || raw.toLowerCase() === "risk" || raw.toLowerCase() === "operating change") return null;
+            return (
+              <div className="analysis-overview-row" style={{ marginTop: 8 }}>
+                <span className="analysis-ov-label">{canViewAdminControls() ? "Driver category" : "Exposure driver"}</span>
+                <span className="analysis-ov-text">{raw}</span>
+              </div>
+            );
+          })()}
 
           <div className="analysis-placeholder-row">
             <div className="analysis-placeholder">
@@ -3924,6 +4026,7 @@ function DetailPanel({
             methodology={methodology}
             evidence={normalizedEvidence}
             sectionType={sectionType}
+            issue={issueForPath}
           />
         </div>
       )}
@@ -5038,6 +5141,29 @@ function deriveActionRoiFields(
   };
 }
 
+// Buyer-visible narrative should not use vague "verified" wording — official
+// producer-price metrics come from BLS (and diesel from EIA). Display-only; the
+// stored issue text is unchanged.
+function officializeText(s?: string | null): string {
+  if (!s) return s ?? "";
+  return String(s)
+    .replace(/\bA verified\b/g, "An official")
+    .replace(/\bverified (diesel|fuel)\b/gi, "official EIA $1")
+    .replace(/\bverified (freight|steel|copper|aluminum|fabricated|metal)\b/gi, "official BLS $1")
+    .replace(/\bverified external (metric|number|shock)\b/gi, "official $1")
+    .replace(/\bverified producer-price\b/gi, "official BLS producer-price")
+    .replace(/\bverified\b/gi, "official");
+}
+
+// Concise per-input provenance shown directly under a formula (DB-backed, no need
+// to open the audit tab). e.g. "steel spend — demo seed; unpassed % — inferred assumption".
+function inlineProvenanceText(issue: any): string {
+  const prov = Array.isArray(issue?.formula_provenance) ? issue.formula_provenance : [];
+  if (prov.length === 0) return "";
+  const map: Record<string, string> = { uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual" };
+  return prov.map((p: any) => `${p.input_label || p.input_name} — ${map[p.source_type] || p.source_type}`).join("; ");
+}
+
 // Truncate on a word boundary (never mid-word) so action copy doesn't end like "befor".
 function clampToWord(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -5881,10 +6007,12 @@ function TrustAuditPanel({
   methodology,
   evidence,
   sectionType,
+  issue,
 }: {
   methodology?: Methodology | null;
   evidence?: any[];
   sectionType?: "risk_register" | "operating_changes" | "watchlist" | "opportunity";
+  issue?: any;
 }) {
   const method: any = methodology || {};
   const status = getIssueModelStatus(methodology);
@@ -5938,8 +6066,70 @@ function TrustAuditPanel({
     : "";
 
   const wrongSentence = getWhatWouldMakeThisWrong(methodology);
-  const formula = String(method.formula || "").replace(/_/g, " ").replace(/%/g, "percent");
+  const rawFormula = String(method.formula || "");
   const honesty = String(method.honesty_note || "");
+
+  // ── Display formula with an unambiguous sign for favorable diesel relief (shared helper) ──
+  const formula = formatFormulaForDisplay(rawFormula);
+
+  // ── Per-input provenance (task 1) ──
+  const fi = (issue?.formula_inputs && typeof issue.formula_inputs === "object") ? (issue.formula_inputs as Record<string, unknown>) : {};
+  const demoCal = isDemoMode();
+  const spendProv = demoCal ? "demo supplier spend" : "uploaded supplier spend";
+  const calProv = demoCal ? "demo calibration" : "calibration table";
+  const fl = formula.toLowerCase();
+  const formulaInputRows: { label: string; prov: string }[] = [];
+  if (/freight spend/.test(fl)) formulaInputRows.push({ label: "freight spend", prov: calProv });
+  if (/spot/.test(fl)) formulaInputRows.push({ label: "spot %", prov: calProv });
+  if (/steel spend/.test(fl)) formulaInputRows.push({ label: "steel spend", prov: spendProv });
+  if (/copper spend/.test(fl)) formulaInputRows.push({ label: "copper spend", prov: spendProv });
+  if (/aluminum spend/.test(fl)) formulaInputRows.push({ label: "aluminum spend", prov: spendProv });
+  if (/unpassed/.test(fl)) formulaInputRows.push({ label: "unpassed %", prov: "inferred assumption" });
+  if (/fuel-exposed freight/.test(fl)) formulaInputRows.push({ label: "fuel-exposed freight", prov: demoCal ? "demo calibration assumption" : "calibration table" });
+
+  // Prefer DB-backed provenance (formula_input_provenance) over the view heuristic.
+  // Only fall back to the heuristic when no persisted provenance exists.
+  const dbProvenance: any[] = Array.isArray((issue as any)?.formula_provenance) ? (issue as any).formula_provenance : [];
+  const provenanceFromDb = dbProvenance.length > 0;
+  const sourceTypeLabel = (st: string): string =>
+    (({ uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual entry" } as Record<string, string>)[st] || st);
+  const operatorView = canViewAdminControls();
+
+  // ── Formula governance (task 2) ──
+  const formulaOwner = issue?.owner || "Unassigned — assign on first review";
+  const lastValidatedRaw = issue?.last_updated || issue?.updated_at || issue?.created_at || null;
+  const lastValidated = lastValidatedRaw
+    ? new Date(lastValidatedRaw).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+    : "Not yet validated against company data";
+  const assumptionSource = demoCal ? "demo calibration (illustrative, not real company data)" : "company calibration table";
+
+  // ── Sensitivity band (task 3) — display only; never changes the core estimate ──
+  const numF = (v: unknown) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+  const sensitivity = (() => {
+    const pct = numF(fi.percent_change) ?? numF(fi.abs_percent_change);
+    const base = Math.abs(numF(issue?.business_estimate) ?? numF(issue?.impact_high) ?? numF(fi.result) ?? 0);
+    if (!base || pct == null) return null;
+    const aPct = Math.abs(pct), pctLo = aPct * 0.8, pctHi = aPct * 1.2;
+    const commoditySpend = numF(fi.commodity_spend), unpassed = numF(fi.unpassed_share);
+    const freightSpend = numF(fi.freight_spend), spot = numF(fi.spot_exposure_pct);
+    const fuelFreight = numF(fi.fuel_exposed_freight);
+    let lo = base * 0.7, hi = base * 1.3, lever = "PPI move ±20%";
+    if (commoditySpend != null && unpassed != null) {
+      lo = commoditySpend * Math.max(0, unpassed - 0.10) * (pctLo / 100);
+      hi = commoditySpend * Math.min(1, unpassed + 0.10) * (pctHi / 100);
+      lever = "unpassed share ±10pp · PPI move ±20%";
+    } else if (freightSpend != null && spot != null) {
+      lo = freightSpend * Math.max(0, spot / 100 - 0.10) * (pctLo / 100);
+      hi = freightSpend * Math.min(1, spot / 100 + 0.10) * (pctHi / 100);
+      lever = "spot exposure ±10pp · PPI move ±20%";
+    } else if (fuelFreight != null) {
+      lo = fuelFreight * 0.85 * (pctLo / 100) * 0.7;
+      hi = fuelFreight * 1.15 * (pctHi / 100) * 1.0;
+      lever = "fuel-exposed base ±15% · surcharge capture 70–100%";
+    }
+    lo = Math.abs(lo); hi = Math.abs(hi);
+    return { base, conservative: Math.min(lo, hi), lo: Math.min(lo, hi), hi: Math.max(lo, hi), lever };
+  })();
 
   if (!methodology) {
     return (
@@ -5977,39 +6167,62 @@ function TrustAuditPanel({
           </div>
         )}
 
-        {formula && (() => {
-          const f = formula.toLowerCase();
-          const inputs: string[] = [];
-          if (/freight spend/.test(f)) inputs.push("freight spend");
-          if (/spot/.test(f)) inputs.push("spot %");
-          if (/steel spend/.test(f)) inputs.push("steel spend");
-          if (/copper spend/.test(f)) inputs.push("copper spend");
-          if (/aluminum spend/.test(f)) inputs.push("aluminum spend");
-          if (/unpassed/.test(f)) inputs.push("unpassed %");
-          if (/fuel-exposed freight/.test(f)) inputs.push("fuel-exposed freight");
-          const src = isDemoMode()
-            ? "shared demo calibration (illustrative, not real company data)"
-            : "calibration table";
-          return (
-            <div className="trust-row">
-              <span className="trust-row-label">Company inputs</span>
-              <div className="trust-row-value">
-                {inputs.length > 0 && <span>{inputs.join(", ")}</span>}
-                <span className="trust-row-source">Source: {src}</span>
-              </div>
+        {/* Per-input provenance (task 1) — DB-backed first, view heuristic only as fallback. */}
+        {formula && (
+          <div className="trust-row">
+            <span className="trust-row-label">Company input provenance{provenanceFromDb ? "" : " (derived)"}</span>
+            <div className="trust-row-value">
+              {provenanceFromDb ? (
+                dbProvenance.map((p) => (
+                  <span key={p.id || p.input_name} className="trust-row-note">
+                    {(p.input_label || p.input_name)}: {sourceTypeLabel(p.source_type)}
+                    {operatorView
+                      ? ` · ${p.source_label ?? ""}${p.confidence ? ` · confidence ${p.confidence}` : ""}${p.owner ? ` · owner ${p.owner}` : ""}${p.last_validated_at ? ` · validated ${new Date(p.last_validated_at).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}` : ""}`
+                      : ""}
+                  </span>
+                ))
+              ) : formulaInputRows.length > 0 ? (
+                formulaInputRows.map((r) => (
+                  <span key={r.label} className="trust-row-note">{r.label}: {r.prov}</span>
+                ))
+              ) : (
+                <span className="trust-row-note">per-input provenance unavailable; shared demo calibration used.</span>
+              )}
             </div>
-          );
-        })()}
+          </div>
+        )}
 
         {formula && /fuel-exposed freight/i.test(formula) && (
           <div className="trust-row">
             <span className="trust-row-label">Base note</span>
             <span className="trust-row-value">
               Fuel-exposed freight base includes fuel-sensitive surchargeable lanes; it may differ from the
-              spot-exposed freight spend used in the Freight PPI issue.{isDemoMode() ? " In this demo the base is shared demo calibration (assumption)." : ""}
+              spot-exposed freight spend used in the Freight PPI issue.{isDemoMode() ? " Source: demo calibration assumption." : ""}
             </span>
           </div>
         )}
+
+        {/* Sensitivity band (task 3) — display only; core estimate unchanged. */}
+        {sensitivity && (
+          <div className="trust-row">
+            <span className="trust-row-label">Sensitivity</span>
+            <div className="trust-row-value">
+              <span>Base ~{formatMoney(sensitivity.base)} · Conservative ~{formatMoney(sensitivity.conservative)} · Range ~{formatMoney(sensitivity.lo)}–{formatMoney(sensitivity.hi)}</span>
+              <span className="trust-row-source">Varying {sensitivity.lever} (illustrative, does not change the core estimate)</span>
+            </div>
+          </div>
+        )}
+
+        {/* Formula governance (task 2). */}
+        <div className="trust-row">
+          <span className="trust-row-label">Governance</span>
+          <div className="trust-row-value">
+            <span className="trust-row-note">Formula owner: {formulaOwner}</span>
+            <span className="trust-row-note">Last validated: {lastValidated}</span>
+            <span className="trust-row-note">Assumption source: {assumptionSource}</span>
+            <span className="trust-row-note">Sensitivity: {sensitivity ? `~${formatMoney(sensitivity.lo)}–${formatMoney(sensitivity.hi)} under the levers above` : "single-point estimate; provide company data to band it"}</span>
+          </div>
+        </div>
 
         <div className="trust-row">
           <span className="trust-row-label">Exposure base</span>

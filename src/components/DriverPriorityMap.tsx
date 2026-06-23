@@ -62,9 +62,9 @@ function execReason(text: string | null | undefined, execMode: boolean): string 
   const t = text ?? "";
   if (!execMode) return t;
   return t
-    .replace(/active scenario downside risk with modeled range/gi, "active source-backed operating risk")
-    .replace(/with modeled range/gi, "with a source-backed estimate")
-    .replace(/modeled range/gi, "source-backed estimate")
+    .replace(/active scenario downside risk with modeled range/gi, "active official metric-backed operating risk")
+    .replace(/with modeled range/gi, "with an official metric-backed estimate")
+    .replace(/modeled range/gi, "official metric-backed estimate")
     .replace(/scenario downside range/gi, "operating downside")
     .replace(/active scenario downside risk/gi, "active operating risk")
     .replace(/scenario downside/gi, "operating downside");
@@ -376,7 +376,7 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
                         return <span className="gs-driver-impact">{exec}</span>;
                       }
                       if (exec && shownDollarTitles.has(title)) {
-                        return <span className="gs-driver-impact" style={{ color: "var(--text-muted)" }}>Supporting signal · included in primary estimate</span>;
+                        return <span className="gs-driver-impact" style={{ color: "var(--text-muted)" }}>Supporting signal · not separately estimated</span>;
                       }
                       if (driver.estimatedImpact) return <span className="gs-driver-impact" style={{ color: "var(--text-muted)" }}>{driver.estimateQuality || "Supporting signal"}</span>;
                       return <span className="gs-driver-impact" style={{ color: "var(--text-faint)" }}>—</span>;
@@ -399,10 +399,10 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
                   <span className="gs-driver-reason">
                     {isSupportRow(driver)
                       ? (driver.key === "supplier" || /supplier|concentration/i.test(String(driver.reason ?? ""))
-                          ? "Potential supplier dependency concern; requires supplier concentration validation."
+                          ? "Potential supplier dependency signal · not separately estimated. Requires supplier concentration validation before it can affect a dollar estimate."
                           : "Supporting signal; corroborates the primary driver — no separate dollar estimate.")
                       : primaryActive
-                      ? "Source-backed operating issue with an open validation action."
+                      ? "Official metric-backed operating issue with an open validation action."
                       : execReason(driver.reason, execMode)}
                   </span>
                 </td>

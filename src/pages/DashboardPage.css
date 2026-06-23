@@ -2498,6 +2498,12 @@
   color: var(--text-muted);
   font-style: italic;
 }
+.watchlist-signal-note {
+  margin: 4px 0 0;
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-style: italic;
+}
 
 .watchlist-toggle {
   white-space: nowrap;
@@ -2513,6 +2519,16 @@
 /* ── Compact Memo ── */
 .memo-section {
   border-top: 3px solid var(--accent);
+}
+.memo-stale-note {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--warning, #b45309);
+  background: var(--warning-bg, rgba(180, 83, 9, 0.1));
+  border: 1px solid var(--warning-border, rgba(180, 83, 9, 0.3));
+  border-radius: 8px;
+  padding: 6px 10px;
 }
 
 .memo-compact {

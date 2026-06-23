@@ -88,6 +88,19 @@ function num(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// Display-only: clarify the sign for favorable diesel/fuel relief so a "× +2.9%"
+// never reads like a cost increase. Never changes the stored formula or estimate.
+export function formatFormulaForDisplay(raw: string | null | undefined): string {
+  if (!raw) return raw ?? "";
+  let f = String(raw).replace(/_/g, " ");
+  if (/fuel-exposed freight/i.test(f)) {
+    f = f
+      .replace(/×\s*\+?(\d+(?:\.\d+)?)\s*%/i, "× diesel decrease $1%")
+      .replace(/=\s*(\$\S+)\s*$/i, "= ~$1 relief");
+  }
+  return f;
+}
+
 // ── Per-issue executive estimate ──────────────────────────────────────────────
 export function getExecutiveImpactEstimate(
   issue: IssueLike,
@@ -123,7 +136,7 @@ export function getExecutiveImpactEstimate(
       title,
       sourceLabel: official ? `Official metric · ${srcLabel ?? "source"}` : `Article-claimed · ${srcLabel ?? "source"}`,
       confidence: official ? "Medium-high" : "Low",
-      calculation: formula,
+      calculation: formatFormulaForDisplay(formula),
       sources: [
         { label: official ? "Official metric" : "Article claim", value: `${srcLabel ?? "source"}${changeStr ? ` · ${changeStr}` : ""}` },
         ...(snippet ? [{ label: "Basis", value: String(snippet).slice(0, 140) }] : []),

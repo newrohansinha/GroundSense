@@ -230,7 +230,7 @@ function buildFreightPath(input: BuildExposureGraphInput): ExposurePath | null {
       valueLabel: moveLabel,
       sourceLabel: `BLS Freight Transportation Arrangement PPI${period ? `, ${period}` : ""}`,
       status: "verified",
-      statusLabel: "Verified public metric",
+      statusLabel: "Official metric",
       driver: "freight",
     },
     {

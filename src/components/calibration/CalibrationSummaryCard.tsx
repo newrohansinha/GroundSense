@@ -10,6 +10,9 @@ type Props = {
   // watchlist items are blocked by missing data.
   publishedCount?: number;
   watchlistBlocked?: number;
+  // DB-backed company coverage (company_calibration_coverage). Distinct from the
+  // local browser workbench — shown as its own labeled row, never conflated.
+  dbCoverage?: { coverage_pct: number; domains_populated: number; domains_total: number } | null;
 };
 
 // Domains surfaced as chips on the dashboard (the ones that map to live issues).
@@ -28,8 +31,8 @@ function reliabilityTone(score: number): string {
   return "none";
 }
 
-export default function CalibrationSummaryCard({ controller, publishedCount = 0, watchlistBlocked = 0 }: Props) {
-  const { workbench, persistence, state } = controller;
+export default function CalibrationSummaryCard({ controller, publishedCount = 0, watchlistBlocked = 0, dbCoverage = null }: Props) {
+  const { workbench, state } = controller;
   const { summary, domainScores } = workbench;
   const scoreByDomain = (k: DomainKey) => domainScores.find((d) => d.domain === k);
   const [showDetails, setShowDetails] = useState(false);
@@ -44,19 +47,19 @@ export default function CalibrationSummaryCard({ controller, publishedCount = 0,
       <style>{CSS}</style>
       <div className="gs-calsum-head">
         <div>
-          <p className="gs-calsum-eyebrow">Company data coverage driving current estimates</p>
+          <p className="gs-calsum-eyebrow">Calibration coverage by source — published issues, company DB, and local workbench shown separately</p>
           <h2 className="gs-calsum-title">Calibration Summary</h2>
         </div>
-        <span className={`gs-calsum-persist gs-calsum-persist-${persistence}`}>
-          {persistence === "supabase" ? "Persisted to database" : "Demo session — saved locally"}
-        </span>
+        <span className="gs-calsum-persist gs-calsum-persist-local">Local editing: browser workbench</span>
       </div>
 
       <div className="gs-calsum-stats">
-        <Stat value={`${publishedCount}/${publishedCount}`} label="Published-issue coverage" tone={publishedCount > 0 ? "high" : undefined} />
-        <Stat value={`${summary.modelReliability}%`} label="All-model calibration coverage" tone={reliabilityTone(summary.modelReliability)} />
-        <Stat value={`${summary.inputsCalibrated}/${summary.inputsRequired}`} label="All-model inputs calibrated" />
-        <Stat value={String(summary.inferredAssumptions)} label="Inferred remaining" />
+        <Stat value={`${publishedCount}/${publishedCount}`} label="Published issue coverage" tone={publishedCount > 0 ? "high" : undefined} />
+        {dbCoverage
+          ? <Stat value={`${dbCoverage.coverage_pct}%`} label={`DB/company calibration coverage · ${dbCoverage.domains_populated}/${dbCoverage.domains_total} domains`} tone={reliabilityTone(dbCoverage.coverage_pct)} />
+          : <Stat value="n/a" label="DB/company calibration coverage · not loaded" />}
+        <Stat value={(summary.inputsCalibrated > 0 || summary.modelReliability > 0) ? `${summary.modelReliability}%` : "n/a"} label="Local workbench coverage (this browser only)" tone={reliabilityTone(summary.modelReliability)} />
+        <Stat value={String(summary.inferredAssumptions)} label="Inferred remaining (local)" />
         <Stat value={String(summary.estimatesImproved)} label="Estimates improved" />
         <Stat value={String(watchlistBlocked)} label="Watchlist blocked by missing data" tone={watchlistBlocked > 0 ? "mid" : undefined} />
       </div>

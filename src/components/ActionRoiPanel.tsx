@@ -84,7 +84,7 @@ function EffortBadge({ effort }: { effort: string }) {
     high: "gs-arp-effort gs-arp-effort-high",
   };
   const cls = classMap[normalized] ?? "gs-arp-effort";
-  return <span className={cls}>{effort}</span>;
+  return <span className={cls}>Effort: {effort}</span>;
 }
 
 export default function ActionRoiPanel({ actions, compact = false, execMode = false, onStatusChange }: ActionRoiPanelProps) {
@@ -235,6 +235,10 @@ export default function ActionRoiPanel({ actions, compact = false, execMode = fa
         .gs-arp-effort-low { color: var(--success); }
         .gs-arp-effort-medium { color: var(--warning); }
         .gs-arp-effort-high { color: var(--danger); }
+        .gs-arp-capture-priority {
+          font-size: 11px; font-weight: 700; padding: 2px 8px; border-radius: 999px;
+          background: var(--success-bg); color: var(--success); white-space: nowrap;
+        }
       `}</style>
 
       <div className="gs-arp-header">
@@ -303,6 +307,10 @@ export default function ActionRoiPanel({ actions, compact = false, execMode = fa
                   <div className="gs-arp-benefit-row">
                     {action.execBenefit && (
                       <span className="gs-arp-benefit">{action.execBenefit}</span>
+                    )}
+                    {/* Favorable value-capture has its own priority, distinct from downside risk priority. */}
+                    {action.execBenefit && /relief|favorable/i.test(action.execBenefit) && (
+                      <span className="gs-arp-capture-priority" title="Priority of capturing this favorable value (separate from downside risk priority)">Capture priority: High</span>
                     )}
                     {action.effortLevel && <EffortBadge effort={action.effortLevel} />}
                   </div>
