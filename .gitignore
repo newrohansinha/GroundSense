@@ -30,6 +30,8 @@ trace.zip
 /dash-*.png
 /dashboard-*.png
 /smoke-*.png
+/demo-*.png
+/operator-*.png
 
 # Supabase CLI scratch
 supabase/.temp/
