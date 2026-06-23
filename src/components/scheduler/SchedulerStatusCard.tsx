@@ -68,8 +68,24 @@ export default function SchedulerStatusCard({
 
   const cfg = status?.config;
   const last = status?.lastRun;
+  const lastScheduled = status?.lastScheduledRun ?? null;
+  const scheduledSuccessEver = status?.scheduledSuccessEver ?? false;
   const enabled = cfg?.enabled ?? false;
   const activeRun = status?.activeRun ?? null;
+
+  // The schedule says "enabled" but the automated path has never produced a
+  // successful run — surface that honestly instead of a silent green "enabled".
+  const scheduleNeverSucceeded = enabled && !scheduledSuccessEver;
+  const lastScheduledFailed = lastScheduled?.status === "failed";
+
+  // Honest one-liner for the scheduled path's last result.
+  const scheduledLine = !lastScheduled
+    ? "No scheduled run has executed yet"
+    : lastScheduled.status === "failed"
+    ? `Failed — ${lastScheduled.error_message ?? "see history"}`
+    : lastScheduled.status === "skipped"
+    ? `Skipped — ${lastScheduled.skipped_reason ?? "no material change"}`
+    : `${lastScheduled.status.replace(/_/g, " ")} · ${relative(lastScheduled.started_at)}`;
 
   async function toggleEnabled() {
     if (!cfg) return;
@@ -117,8 +133,14 @@ export default function SchedulerStatusCard({
 
       <div className="gs-sched-grid">
         <div>
-          <p className="gs-sched-k">Last run</p>
+          <p className="gs-sched-k">Last run (any trigger)</p>
           <p className="gs-sched-v">{last ? `${last.trigger_type} · ${relative(last.started_at)}` : "—"}</p>
+        </div>
+        <div>
+          <p className="gs-sched-k">Last scheduled run</p>
+          <p className="gs-sched-v" style={lastScheduledFailed ? { color: "var(--danger)" } : undefined}>
+            {scheduledLine}
+          </p>
         </div>
         <div>
           <p className="gs-sched-k">Result</p>
@@ -129,6 +151,15 @@ export default function SchedulerStatusCard({
           <p className="gs-sched-v">{enabled ? nextLabel(status?.nextRunIso ?? null) : "Paused"}</p>
         </div>
       </div>
+
+      {(scheduleNeverSucceeded || lastScheduledFailed) && (
+        <div className="dashboard-subtitle" style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "var(--danger-bg)", border: "1px solid var(--danger-border, var(--danger))" }}>
+          <b style={{ color: "var(--danger)" }}>⚠ Scheduled automation needs attention</b> —{" "}
+          {scheduleNeverSucceeded
+            ? "the schedule is enabled but no scheduled run has ever completed. The daily run history below will confirm once the next 10:00 UTC run succeeds."
+            : `the last scheduled run failed${lastScheduled?.error_message ? ` (${lastScheduled.error_message})` : ""}. Check run history for details.`}
+        </div>
+      )}
 
       {activeRun && (
         <div className="dashboard-subtitle" style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "var(--accent-muted)", border: "1px solid var(--accent)" }}>

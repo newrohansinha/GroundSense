@@ -102,6 +102,15 @@ export type RunProgressSnapshot = RunSummary &
 export type SchedulerStatus = {
   config: SchedulerConfig | null;
   lastRun: RunSummary | null;
+  // The most recent run whose trigger_type is "scheduled" (the daily cron),
+  // tracked separately from lastRun (which may be a manual run) so the card can
+  // honestly report whether the AUTOMATED path is actually working.
+  lastScheduledRun: RunSummary | null;
+  // True iff at least one scheduled run has ever reached completed /
+  // completed_with_warnings. Spans all history (not just recentRuns) so the card
+  // can warn "schedule enabled but never succeeded" even when manual runs fill
+  // the recent list.
+  scheduledSuccessEver: boolean;
   recentRuns: RunSummary[];
   nextRunIso: string | null;
   // The currently-active run (status=running with a FRESH heartbeat). Null if no
@@ -167,11 +176,11 @@ export async function getSchedulerStatus(companyId: string | null): Promise<Sche
   // renders a clean "not configured / paused" state), and run history shows
   // only this company's runs (never another tenant's or the demo's).
   if (!companyId) {
-    return { config: null, lastRun: null, recentRuns: [], nextRunIso: null, activeRun: null };
+    return { config: null, lastRun: null, lastScheduledRun: null, scheduledSuccessEver: false, recentRuns: [], nextRunIso: null, activeRun: null };
   }
   // Repair any stuck run first so a dead run never disables the button forever.
   await expireStaleRuns(companyId);
-  const [{ data: cfgRows }, { data: runRows }] = await Promise.all([
+  const [{ data: cfgRows }, { data: runRows }, { data: schedRows }, { count: schedSuccessCount }] = await Promise.all([
     supabase
       .from("intelligence_scheduler_config")
       .select("*")
@@ -184,10 +193,27 @@ export async function getSchedulerStatus(companyId: string | null): Promise<Sche
       .eq("company_id", companyId)
       .order("started_at", { ascending: false })
       .limit(10),
+    // Most recent SCHEDULED run (any status) — may be older than the last 10 runs.
+    supabase
+      .from("intelligence_run_summaries")
+      .select("*")
+      .eq("company_id", companyId)
+      .eq("trigger_type", "scheduled")
+      .order("started_at", { ascending: false })
+      .limit(1),
+    // Has any scheduled run ever succeeded across all history?
+    supabase
+      .from("intelligence_run_summaries")
+      .select("id", { count: "exact", head: true })
+      .eq("company_id", companyId)
+      .eq("trigger_type", "scheduled")
+      .in("status", ["completed", "completed_with_warnings"]),
   ]);
 
   const config = (cfgRows?.[0] as SchedulerConfig) ?? null;
   const recentRuns = (runRows as (RunSummary & Partial<RunProgress>)[]) ?? [];
+  const lastScheduledRun = (schedRows?.[0] as RunSummary) ?? null;
+  const scheduledSuccessEver = (schedSuccessCount ?? 0) > 0;
   // Active = running with a fresh heartbeat (stale ones were just expired above).
   const freshCutoff = Date.now() - STALE_RUN_MINUTES * 60_000;
   const activeRun = recentRuns.find(
@@ -197,6 +223,8 @@ export async function getSchedulerStatus(companyId: string | null): Promise<Sche
   return {
     config,
     lastRun: recentRuns[0] ?? null,
+    lastScheduledRun,
+    scheduledSuccessEver,
     recentRuns,
     nextRunIso: config?.enabled ? computeNextRun(config.cron_expression) : null,
     activeRun,
