@@ -230,7 +230,7 @@ Deno.serve(async (req) => {
     // immediate kick is lost; either way the browser is irrelevant from here.
     await db.from("intelligence_run_summaries").update({
       status: "queued",
-      next_stage: "fetch-fresh",
+      next_stage: "refresh-sources",
       stage_cursor: { query_index: 0 },
       worker_claimed_until: null,
       current_stage: "queued",

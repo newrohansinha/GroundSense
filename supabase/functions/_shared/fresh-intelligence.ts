@@ -193,7 +193,10 @@ export type FreshIntelligenceCounters = {
   articles_normalized: number;
   articles_inserted: number;
   article_duplicates: number;
-  articles_rejected: number;
+  articles_rejected: number;              // failed the relevance gate
+  articles_failed_normalization: number;  // missing fields / unparseable or stale date
+  articles_failed_insert: number;         // normalized + new, but the DB write failed
+  articles_skipped: number;               // not processed (cap/remainder)
   failed_calls: number;
   rate_limited: number;
 };
@@ -308,38 +311,50 @@ function startDateIso() {
   return d.toISOString();
 }
 
-function normalizeArticle(companyId: string, article: CurrentsArticle, query: TrackingQuery): NormalizedArticle | null {
+type ArticleBucket = "ok" | "bad_data" | "stale" | "relevance";
+
+// Classifies an article into exactly one bucket so the run can reconcile every
+// fetched article. bad_data/stale → failed_normalization; relevance → rejected.
+function classifyArticle(companyId: string, article: CurrentsArticle, query: TrackingQuery): { row: NormalizedArticle | null; bucket: ArticleBucket; reason: string } {
   const title = String(article.title || "").trim();
   const description = String(article.description || "").trim();
   const sourceUrl = String(article.url || "").trim();
-  if (!title || !sourceUrl) return null;
+  if (!title || !sourceUrl) return { row: null, bucket: "bad_data", reason: "missing title or url" };
   const domain = domainFromUrl(sourceUrl);
   const publishedDate = parseDate(article.published);
   const days = ageDays(publishedDate);
-  if (!publishedDate || days === null) return null;
-  if (days > FRESH_DAYS) return null;
+  if (!publishedDate || days === null) return { row: null, bucket: "bad_data", reason: "unparseable published date" };
+  if (days > FRESH_DAYS) return { row: null, bucket: "stale", reason: `older than ${FRESH_DAYS}d (${days}d)` };
   const source = scoreNewsSource({ url: sourceUrl, sourceName: domain });
   const quality = calculateArticleQuality({ article, query, source, days });
-  if (!quality.accepted) return null;
+  if (!quality.accepted) return { row: null, bucket: "relevance", reason: quality.reason };
   return {
-    company_id: companyId,
-    title,
-    description: description || null,
-    source_url: sourceUrl,
-    source_name: domain,
-    query_text: query.query_text,
-    published_at: publishedDate.toISOString(),
-    source_quality: quality.score,
-    event_age_days: days,
-    relevance_seed_score: quality.score,
-    freshness_bucket: freshnessBucket(days),
-    source_api: "currents_api",
-    source_tier: sourceTier(source.score),
-    tracking_query_id: isValidUuid(query.id) ? query.id : null,
-    matched_terms: quality.matchedRequired,
-    signal_terms: quality.matchedSignals,
-    quality_reason: quality.reason,
+    bucket: "ok",
+    reason: quality.reason,
+    row: {
+      company_id: companyId,
+      title,
+      description: description || null,
+      source_url: sourceUrl,
+      source_name: domain,
+      query_text: query.query_text,
+      published_at: publishedDate.toISOString(),
+      source_quality: quality.score,
+      event_age_days: days,
+      relevance_seed_score: quality.score,
+      freshness_bucket: freshnessBucket(days),
+      source_api: "currents_api",
+      source_tier: sourceTier(source.score),
+      tracking_query_id: isValidUuid(query.id) ? query.id : null,
+      matched_terms: quality.matchedRequired,
+      signal_terms: quality.matchedSignals,
+      quality_reason: quality.reason,
+    },
   };
+}
+
+function normalizeArticle(companyId: string, article: CurrentsArticle, query: TrackingQuery): NormalizedArticle | null {
+  return classifyArticle(companyId, article, query).row;
 }
 
 export type FreshFetchOptions = {
@@ -358,6 +373,7 @@ function emptyCounters(): FreshIntelligenceCounters {
     raw_queries_generated: 0, deduped_queries: 0, capped_queries: 0,
     queries_executed: 0, articles_fetched: 0, articles_normalized: 0,
     articles_inserted: 0, article_duplicates: 0, articles_rejected: 0,
+    articles_failed_normalization: 0, articles_failed_insert: 0, articles_skipped: 0,
     failed_calls: 0, rate_limited: 0,
   };
 }
@@ -439,11 +455,16 @@ async function processOneQuery(
     ? result.articles.slice(0, opts.maxArticlesPerQuery)
     : result.articles;
   counters.articles_fetched += consideredArticles.length;
-  const normalized = consideredArticles
-    .map((a) => normalizeArticle(companyId, a, query))
-    .filter((r): r is NormalizedArticle => Boolean(r));
+
+  // Bucket every fetched article so the run reconciles (BUG 1).
+  const normalized: NormalizedArticle[] = [];
+  for (const a of consideredArticles) {
+    const c = classifyArticle(companyId, a, query);
+    if (c.bucket === "ok" && c.row) { normalized.push(c.row); }
+    else if (c.bucket === "relevance") counters.articles_rejected += 1;
+    else counters.articles_failed_normalization += 1; // bad_data | stale
+  }
   counters.articles_normalized += normalized.length;
-  counters.articles_rejected += Math.max(0, consideredArticles.length - normalized.length);
 
   const freshRows: NormalizedArticle[] = [];
   for (const row of normalized) {
@@ -465,8 +486,26 @@ async function processOneQuery(
   });
 
   if (newRows.length > 0 && !opts.dryRun) {
+    // Insert; on schema/column error fall back to a minimal known-good column
+    // set (mirrors the old client path) so an extra column never silently drops
+    // a whole batch. Anything still failing is counted, never lost.
     const { error: insErr } = await db.from("raw_events").insert(newRows);
-    if (!insErr) counters.articles_inserted += newRows.length;
+    if (!insErr) {
+      counters.articles_inserted += newRows.length;
+    } else {
+      const minimal = newRows.map((r) => ({
+        company_id: r.company_id, title: r.title, description: r.description,
+        source_url: r.source_url, source_name: r.source_name, query_text: r.query_text,
+        published_at: r.published_at, source_quality: r.source_quality,
+        event_age_days: r.event_age_days, relevance_seed_score: r.relevance_seed_score,
+        freshness_bucket: r.freshness_bucket, source_api: r.source_api, source_tier: r.source_tier,
+      }));
+      const { error: minErr } = await db.from("raw_events").insert(minimal);
+      if (!minErr) counters.articles_inserted += newRows.length;
+      else counters.articles_failed_insert += newRows.length;
+    }
+  } else if (newRows.length > 0 && opts.dryRun) {
+    counters.articles_skipped += newRows.length; // dry_run: would-insert, not written
   }
 
   await db.from("news_tracking_queries").update({ last_run_at: new Date().toISOString() }).eq("id", query.id);

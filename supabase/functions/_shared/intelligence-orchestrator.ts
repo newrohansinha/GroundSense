@@ -14,6 +14,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { createClient } from "jsr:@supabase/supabase-js@2";
 import { runFreshIntelligenceFetch } from "./fresh-intelligence.ts";
+import { recomputeProvenanceAndCoverage } from "./provenance.ts";
 
 export type RunMode = "full" | "source_scan" | "generate_only" | "graph_only" | "brief_only";
 
@@ -110,6 +111,69 @@ async function invokeFunction(name: string, body: unknown): Promise<{ ok: boolea
     return { ok: true };
   } catch (e) {
     return { ok: false, error: `${name} -> ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+// Like invokeFunction but returns the parsed JSON body (for functions whose
+// counters we need to persist, e.g. refresh-sources).
+async function invokeFunctionJson(name: string, body: unknown): Promise<{ ok: boolean; data: any; error?: string }> {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${SERVICE_KEY}`, apiKey: SERVICE_KEY },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, data, error: `${name} -> HTTP ${res.status}` };
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, data: null, error: `${name} -> ${e instanceof Error ? e.message : String(e)}` };
+  }
+}
+
+// Refreshes the structured numeric sources (BLS/FRED/EIA/Census/USITC/UN
+// Comtrade) into the numeric_shocks ledger, then persists the per-source
+// counters onto the run summary. Best-effort: a source failure never aborts the
+// run (each is captured in source_health + source_refresh_errors).
+async function refreshNumericSources(
+  db: any,
+  opts: OrchestrationOptions,
+  counters: Partial<RunCounts>,
+  warnings: string[],
+): Promise<void> {
+  const r = await invokeFunctionJson("refresh-sources", { runSummaryId: opts.runSummaryId });
+  if (!r.ok || !r.data?.ok) {
+    warnings.push(r.error ?? "refresh-sources failed");
+    return;
+  }
+  const d = r.data;
+  // Live publishable/context counts straight from the ledger.
+  const publishable = await countRows(db, "numeric_shocks", (q) => q.eq("can_publish", true));
+  const contextOnly = await countRows(db, "numeric_shocks", (q) => q.eq("can_publish", false));
+  counters.verified_shocks_created = Number(d.numeric_shocks_created) || 0;
+  if (opts.runSummaryId) {
+    await db.from("intelligence_run_summaries").update({
+      bls_metrics_refreshed: Number(d.bls_metrics_refreshed) || 0,
+      fred_metrics_refreshed: Number(d.fred_metrics_refreshed) || 0,
+      eia_metrics_refreshed: Number(d.eia_metrics_refreshed) || 0,
+      census_metrics_refreshed: Number(d.census_metrics_refreshed) || 0,
+      usitc_metrics_refreshed: Number(d.usitc_metrics_refreshed) || 0,
+      un_comtrade_metrics_refreshed: Number(d.un_comtrade_metrics_refreshed) || 0,
+      source_refresh_errors: Number(d.source_refresh_errors) || 0,
+      numeric_shocks_created: Number(d.numeric_shocks_created) || 0,
+      numeric_shocks_publishable: publishable,
+      numeric_shocks_context_only: contextOnly,
+    }).eq("id", opts.runSummaryId);
+
+    const srcLine = Array.isArray(d.sources)
+      ? d.sources.map((s: any) => `${s.source_key}=${s.numeric_shocks_created}${s.errors?.length ? "(err)" : ""}`).join(", ")
+      : "";
+    await db.from("intelligence_run_events").insert({
+      run_id: opts.pipelineRunId, summary_id: opts.runSummaryId, company_id: opts.companyId,
+      stage: "refresh-sources", level: Number(d.source_refresh_errors) > 0 ? "warning" : "info",
+      message: `Numeric sources refreshed: ${d.numeric_shocks_created} shocks (${publishable} publishable). ${srcLine}`,
+      counters: { numeric_shocks_created: Number(d.numeric_shocks_created) || 0, numeric_shocks_publishable: publishable },
+    });
   }
 }
 
@@ -331,8 +395,12 @@ export async function runOrchestration(opts: OrchestrationOptions): Promise<RunC
     return r.ok;
   };
 
-  // ── Stage 0: fresh-intelligence fetch (Currents path, server-side) ────────
+  // ── Stage 0: structured numeric sources + fresh-intelligence fetch ────────
   if (runMode === "full" || runMode === "source_scan") {
+    await writeStage(db, opts, 0, counters, "Refreshing numeric sources (BLS/FRED/EIA/Census/USITC/UN Comtrade).");
+    await refreshNumericSources(db, opts, counters, warnings);
+    await beat(db, opts.runSummaryId, counters);
+
     await writeStage(db, opts, 0, counters, "Fetching external intelligence (Currents).");
     try {
       const fresh = await runFreshIntelligenceFetch(db, companyId, {
@@ -452,6 +520,17 @@ export async function runOrchestration(opts: OrchestrationOptions): Promise<RunC
   // dry runs don't materialize, so materialization checks are informational only.
   if (!consistent && !dryRun) {
     warnings.push(`consistency failed: ${failedChecks.join(", ")} (generated ${generated}, decided ${accountedFor})`);
+  }
+
+  // ── Provenance + calibration coverage (DB-backed trust layer) ─────────────
+  // Runs every scheduled finalize — even when generation was skipped (no material
+  // change) — so formula_input_provenance + company_calibration_coverage stay in
+  // sync with the currently published issues. Idempotent; never throws. A failure
+  // is surfaced as a warning so the run records completed_with_warnings, never a
+  // silent green completion with missing provenance.
+  if (!dryRun) {
+    const prov = await recomputeProvenanceAndCoverage(db, companyId);
+    if (!prov.ok && prov.error) warnings.push(`provenance: ${prov.error}`);
   }
 
   // ── Optional ultra-debug cleanup of generated test rows ───────────────────

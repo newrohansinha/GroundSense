@@ -625,6 +625,27 @@ function scenarioShockRangeForRiskFamily(riskFamily: string) {
   };
 }
 
+function shockTypeFromClaimDriver(driver: string): string {
+  const d = String(driver || "").toLowerCase();
+  // These must match the exact type strings the collectQuantifiedShocksFromEvidence filter accepts.
+  if (d.includes("tariff") || d.includes("duty") || d.includes("levy")) return "tariff_rate";
+  if (d.includes("freight") || d.includes("shipping") || d.includes("logistics")) return "freight_rate";
+  if (d.includes("demand") || d.includes("order") || d.includes("pmi")) return "demand_metric";
+  if (d.includes("competitor")) return "competitor_metric";
+  return "commodity_price"; // steel, copper, aluminum, energy → "commodity_price" passes the commodity filter
+}
+
+function metricFromClaimCommodity(commodity: string | null, driver: string | null): string {
+  const c = String(commodity || driver || "").toLowerCase();
+  // Include "commodity_" prefix so metric.includes("commodity") passes the filter.
+  if (c.includes("tariff") || c.includes("duty")) return "tariff_rate";
+  if (c.includes("freight") || c.includes("shipping")) return "freight_rate";
+  if (c.includes("demand")) return "demand";
+  if (c.includes("competitor")) return "competitor";
+  if (c) return `commodity_${c}`; // "commodity_steel", "commodity_copper" → passes metric.includes("commodity")
+  return "commodity";
+}
+
 function collectQuantifiedShocksFromEvidence(input: {
   riskFamily: string;
   evidenceItems: any[];
@@ -839,6 +860,8 @@ function filterShocksToClusterContext(cluster: any, shocks: any[]) {
   ]);
 
   const mentionsForeignTariffNoise = (shock: any) => {
+    // Commodity prices (copper $/lb, steel spot) are global — only tariff rates are country-specific.
+    if (shock.shock_type !== "tariff_rate") return false;
     const text = shockSearchText(shock);
 
     return includesAny(text, [
@@ -2724,6 +2747,53 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // Augment evidence with article-body numeric claims extracted by the fetch-bodies / extract-numeric-claims stages.
+    // Claims with validated_source_text: true feed into resolveShockRange, so evidence-backed numbers
+    // override scenario fallbacks and enable real published issues.
+    const { data: articleClaims } = await supabase
+      .from("article_metric_claims")
+      .select("id, raw_event_id, extracted_value, extracted_unit, delta_pp, from_value, to_value, direction, commodity, metric_key, driver, claim_text, source_url, source_domain, extraction_confidence")
+      .eq("company_id", companyId)
+      .order("extraction_confidence", { ascending: false })
+      .limit(100);
+    const allArticleClaims: any[] = articleClaims ?? [];
+
+    // Build raw_event_id → claims map for O(1) lookup in cluster loop.
+    const claimsByEventId = new Map<string, any[]>();
+    for (const claim of allArticleClaims) {
+      const eid = claim.raw_event_id;
+      if (!claimsByEventId.has(eid)) claimsByEventId.set(eid, []);
+      claimsByEventId.get(eid)!.push(claim);
+    }
+
+    // Inject article claims as quantified_shocks into matching evidence items.
+    for (const item of evidence) {
+      const claims = claimsByEventId.get(item.raw_event_id) ?? [];
+      for (const c of claims) {
+        // Skip precious metals and employee/headcount claims — not supply chain cost shocks.
+        // Check commodity, metric_key, AND claim_text because Gemini may not populate commodity.
+        const commodityTag = (String(c.commodity || "") + " " + String(c.claim_text || "") + " " + String(c.metric_key || "")).toLowerCase();
+        if (["gold", "silver", "platinum", "palladium"].some(m => commodityTag.includes(m))) continue;
+        if (String(c.extracted_unit || "").toLowerCase() === "count") continue;
+        const val = typeof c.delta_pp === "number" && c.delta_pp > 0 ? c.delta_pp
+          : typeof c.extracted_value === "number" ? c.extracted_value
+          : null;
+        if (val === null || val <= 0 || val > 500) continue;
+        item.quantified_shocks = item.quantified_shocks ?? [];
+        item.quantified_shocks.push({
+          shock_type: shockTypeFromClaimDriver(c.driver || c.metric_key || c.commodity || ""),
+          value_pct: val,
+          direction: c.direction || "up",
+          metric: metricFromClaimCommodity(c.commodity, c.driver || c.metric_key),
+          basis: String(c.claim_text || "").slice(0, 420),
+          confidence: c.extraction_confidence === "high" ? "high" : "medium",
+          validated_source_text: true,
+          extraction_method: "article_body_llm",
+        });
+        item.has_quantified_shock = true;
+      }
+    }
+
     const clustered = await callGemini(
       buildEvidenceClusteringPrompt({
         company,
@@ -2783,6 +2853,32 @@ Deno.serve(async (req: Request) => {
           evidenceQuality,
           impactHigh,
         });
+
+        // Determine numeric basis from article_metric_claims for this cluster's source events.
+        const clusterClaims = allArticleClaims.filter((c: any) => {
+          if (!sourceEventIds.includes(c.raw_event_id)) return false;
+          const ct = (String(c.commodity || "") + " " + String(c.claim_text || "") + " " + String(c.metric_key || "")).toLowerCase();
+          if (["gold", "silver", "platinum", "palladium"].some(m => ct.includes(m))) return false;
+          if (String(c.extracted_unit || "").toLowerCase() === "count") return false;
+          const v = typeof c.delta_pp === "number" && c.delta_pp > 0 ? c.delta_pp
+            : typeof c.extracted_value === "number" ? c.extracted_value : null;
+          return v !== null && v > 0 && v <= 500;
+        });
+        const bestClaim = [...clusterClaims].sort((a: any, b: any) =>
+          (b.extraction_confidence === "high" ? 1 : 0) - (a.extraction_confidence === "high" ? 1 : 0)
+        )[0] ?? null;
+        // Claim driver types that can drive a published issue — must be a direct cost shock
+        // (tariff rate, commodity price, freight rate, energy cost). Demand proxies like export
+        // statistics or PMIs require too many intervening assumptions and cannot publish without
+        // an explicit company segment exposure mapping.
+        const PUBLISHABLE_CLAIM_DRIVER_TYPES = new Set([
+          "commodity_price_change", "tariff_rate", "freight_rate_change",
+          "energy_cost_change", "steel_price_change", "input_cost_change",
+        ]);
+        const claimDriverType = bestClaim?.metric_key ?? null;
+        const claimIsPublishable = claimDriverType != null
+          && PUBLISHABLE_CLAIM_DRIVER_TYPES.has(claimDriverType);
+        const numericBasisType = claimIsPublishable ? "article_numeric_claim" : "no_numeric_basis";
 
         return {
           company_id: companyId,
@@ -2853,9 +2949,24 @@ exposure_interpretation: issueClassification.exposure_interpretation,
             final_low: Math.round(impactLow),
             final_high: Math.round(impactHigh),
             cluster_reason: cleanText(cluster.why_this_cluster_exists, 1000),
+            numeric_claim_driver: claimDriverType,
           },
 
           exposure_path: exposureCalc.exposurePath,
+
+          numeric_basis_type: numericBasisType,
+          numeric_basis_value: bestClaim
+            ? (typeof bestClaim.delta_pp === "number" ? bestClaim.delta_pp : (bestClaim.extracted_value ?? null))
+            : null,
+          numeric_basis_from_value: bestClaim?.from_value ?? null,
+          numeric_basis_to_value: bestClaim?.to_value ?? null,
+          numeric_basis_unit: bestClaim?.extracted_unit ?? null,
+          numeric_basis_snippet: bestClaim?.claim_text ? String(bestClaim.claim_text).slice(0, 500) : null,
+          numeric_basis_source_url: bestClaim?.source_url ?? null,
+          numeric_basis_source_label: bestClaim?.source_domain ?? null,
+          // Stored in methodology so it persists through the non-destructive UPDATE merge.
+          // The gate reads this to confirm the claim driver is a direct cost shock.
+          numeric_basis_claim_driver: claimDriverType,
         };
       })
       .filter(Boolean);
@@ -2919,6 +3030,18 @@ exposure_interpretation: issueClassification.exposure_interpretation,
           if (!row.owner || row.owner === "Executive Owner") row.owner = GATE_DRIVER_ACTIONS[driverKey].owner;
         }
 
+        // Strict publishable basis check: type must resolve, value must be a real %, snippet required
+        // for article claims. `numericBasisType` already gates on PUBLISHABLE_CLAIM_DRIVER_TYPES, so
+        // demand-proxy article claims arrive here as "no_numeric_basis" and fail this check.
+        const hasNumericBasis = ((): boolean => {
+          const btype = row.numeric_basis_type ?? "no_numeric_basis";
+          if (btype === "no_numeric_basis") return false;
+          if (row.numeric_basis_value == null) return false;
+          const unit = String(row.numeric_basis_unit ?? "").toLowerCase();
+          if (!["pct", "pp", "bps", "percent", "%"].includes(unit)) return false;
+          if (btype === "article_numeric_claim" && !row.numeric_basis_snippet) return false;
+          return true;
+        })();
         const missing: string[] = [];
         if (!hasEvidence) missing.push("primary_evidence");
         if (calibratedInputs.length < 2) missing.push("calibrated_inputs");
@@ -2926,10 +3049,12 @@ exposure_interpretation: issueClassification.exposure_interpretation,
         if (!hasValue) missing.push("value_at_stake");
         if (!row.owner || row.owner === "Executive Owner") missing.push("owner");
         if (GENERIC_ACTION_RE.test(String(row.action_required || "").trim())) missing.push("operational_action");
+        // NON-NEGOTIABLE: every published issue must have a real numeric external-change basis.
+        if (!hasNumericBasis) missing.push("numeric_basis");
 
         let gate_status = "published";
         let gate_reason =
-          "Published as active risk: source-backed signal with company exposure basis, calibrated inputs, a calculation formula, and an operational owner action.";
+          "Published as active risk: source-backed signal with company exposure basis, calibrated inputs, a calculation formula, numeric external-change basis, and an operational owner action.";
         if (isActive && missing.length > 0) {
           row.display_section = "watchlist";
           row.issue_category = "watchlist";
@@ -2955,6 +3080,8 @@ exposure_interpretation: issueClassification.exposure_interpretation,
           scenario_status,
           calibration_inputs_used: calibratedInputs,
         };
+        // Write gate_status as a top-level DB column — canonical for all SQL queries (FIX 6).
+        row.gate_status = gate_status;
       }
 
       riskRows.sort((a: any, b: any) => {
@@ -3035,6 +3162,28 @@ riskRows.forEach((row: any, index: number) => {
           impact_high: _ih,
           ...updatable
         } = row;
+        // gate_status is deterministic — always write it through regardless of merge protection.
+        (updatable as any).gate_status = row.gate_status;
+        // Numeric-basis gate demotion writes through: published issues must never have no_numeric_basis.
+        const missingOnUpdate = Array.isArray(row.methodology?.missing_inputs) ? row.methodology.missing_inputs as string[] : [];
+        if (missingOnUpdate.includes("numeric_basis")) {
+          (updatable as any).display_section = row.display_section;
+          (updatable as any).issue_category = row.issue_category;
+          (updatable as any).issue_direction = row.issue_direction;
+          (updatable as any).is_actionable_risk = row.is_actionable_risk;
+        }
+        // Article-claim methodology write-through: when this run established a real article numeric
+        // basis, overwrite the stored methodology so the UI reads the current claim driver, not a
+        // stale scenario_fallback from the row's initial INSERT. Official/manual structured metrics
+        // preserve their canonical methodology (protected by the outer strip).
+        if (row.numeric_basis_type === "article_numeric_claim") {
+          (updatable as any).methodology = row.methodology;
+          (updatable as any).business_impact = row.business_impact;
+          (updatable as any).impact_low = row.impact_low;
+          (updatable as any).impact_high = row.impact_high;
+        }
+        // Strip transient fields not stored as DB columns.
+        delete (updatable as any).numeric_basis_claim_driver;
         const { data, error } = await supabase
           .from("risk_register")
           .update(updatable)
@@ -3045,9 +3194,10 @@ riskRows.forEach((row: any, index: number) => {
         upsertedRisks.push(data);
         risksUpdated++;
       } else {
+        const { numeric_basis_claim_driver: _ncd, ...insertRow } = row as any;
         const { data, error } = await supabase
           .from("risk_register")
-          .insert(row)
+          .insert(insertRow)
           .select(SELECT_COLS)
           .single();
         if (error) throw error;
@@ -3106,6 +3256,35 @@ riskRows.forEach((row: any, index: number) => {
         actionsCreated++;
       }
     }
+
+    // Enforce invariant: every published issue must have a real numeric external-change basis.
+    // This sweep catches orphaned risk_register rows from prior runs that were not regenerated
+    // this run and therefore skipped the per-row gate above.
+    await supabase
+      .from("risk_register")
+      .update({
+        display_section: "watchlist",
+        issue_category: "watchlist",
+        is_actionable_risk: false,
+        gate_status: "watch",
+      })
+      .eq("company_id", companyId)
+      .in("display_section", ["risk_register", "operating_changes"])
+      .eq("numeric_basis_type", "no_numeric_basis");
+
+    // Clear stale numeric_basis_value when the unit is invalid (count/usd — not a % shock).
+    // These were inserted by earlier extract-numeric-claims runs before the quality filter existed.
+    await supabase
+      .from("risk_register")
+      .update({
+        numeric_basis_type: "no_numeric_basis",
+        numeric_basis_value: null,
+        numeric_basis_unit: null,
+        numeric_basis_snippet: null,
+        gate_status: "watch",
+      })
+      .eq("company_id", companyId)
+      .in("numeric_basis_unit", ["count", "usd"]);
 
     return jsonResponse({
       ok: true,
