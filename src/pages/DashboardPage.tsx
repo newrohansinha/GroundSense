@@ -5159,9 +5159,15 @@ function officializeText(s?: string | null): string {
 // to open the audit tab). e.g. "steel spend — demo seed; unpassed % — inferred assumption".
 function inlineProvenanceText(issue: any): string {
   const prov = Array.isArray(issue?.formula_provenance) ? issue.formula_provenance : [];
-  if (prov.length === 0) return "";
-  const map: Record<string, string> = { uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual" };
-  return prov.map((p: any) => `${p.input_label || p.input_name} — ${map[p.source_type] || p.source_type}`).join("; ");
+  const map: Record<string, string> = { uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual", official_metric: "official metric" };
+  if (prov.length > 0) {
+    // Company inputs only (skip the external official-metric row in the concise inline view).
+    const rows = prov.filter((p: any) => p.source_type !== "official_metric");
+    return (rows.length ? rows : prov).map((p: any) => `${p.input_label || p.input_name} — ${map[p.source_type] || p.source_type}`).join("; ");
+  }
+  // A metric-backed issue with a formula SHOULD have DB provenance — never infer silently.
+  const hasFormula = Boolean(issue?.formula || (issue?.methodology && issue.methodology.formula));
+  return hasFormula ? "unavailable — issue requires audit" : "";
 }
 
 // Truncate on a word boundary (never mid-word) so action copy doesn't end like "befor".
@@ -6072,27 +6078,15 @@ function TrustAuditPanel({
   // ── Display formula with an unambiguous sign for favorable diesel relief (shared helper) ──
   const formula = formatFormulaForDisplay(rawFormula);
 
-  // ── Per-input provenance (task 1) ──
+  // ── Per-input provenance (task 1) — DB-backed only. Never infer silently in the
+  //    buyer UI: if a metric-backed issue has no persisted provenance, it's flagged
+  //    "requires audit" instead of a derived guess. ──
   const fi = (issue?.formula_inputs && typeof issue.formula_inputs === "object") ? (issue.formula_inputs as Record<string, unknown>) : {};
   const demoCal = isDemoMode();
-  const spendProv = demoCal ? "demo supplier spend" : "uploaded supplier spend";
-  const calProv = demoCal ? "demo calibration" : "calibration table";
-  const fl = formula.toLowerCase();
-  const formulaInputRows: { label: string; prov: string }[] = [];
-  if (/freight spend/.test(fl)) formulaInputRows.push({ label: "freight spend", prov: calProv });
-  if (/spot/.test(fl)) formulaInputRows.push({ label: "spot %", prov: calProv });
-  if (/steel spend/.test(fl)) formulaInputRows.push({ label: "steel spend", prov: spendProv });
-  if (/copper spend/.test(fl)) formulaInputRows.push({ label: "copper spend", prov: spendProv });
-  if (/aluminum spend/.test(fl)) formulaInputRows.push({ label: "aluminum spend", prov: spendProv });
-  if (/unpassed/.test(fl)) formulaInputRows.push({ label: "unpassed %", prov: "inferred assumption" });
-  if (/fuel-exposed freight/.test(fl)) formulaInputRows.push({ label: "fuel-exposed freight", prov: demoCal ? "demo calibration assumption" : "calibration table" });
-
-  // Prefer DB-backed provenance (formula_input_provenance) over the view heuristic.
-  // Only fall back to the heuristic when no persisted provenance exists.
   const dbProvenance: any[] = Array.isArray((issue as any)?.formula_provenance) ? (issue as any).formula_provenance : [];
   const provenanceFromDb = dbProvenance.length > 0;
   const sourceTypeLabel = (st: string): string =>
-    (({ uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual entry" } as Record<string, string>)[st] || st);
+    (({ uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual entry", official_metric: "official metric" } as Record<string, string>)[st] || st);
   const operatorView = canViewAdminControls();
 
   // ── Formula governance (task 2) ──
@@ -6167,10 +6161,11 @@ function TrustAuditPanel({
           </div>
         )}
 
-        {/* Per-input provenance (task 1) — DB-backed first, view heuristic only as fallback. */}
+        {/* Per-input provenance — DB-backed only. No silent inference: missing provenance
+            on a metric-backed issue is flagged for audit. */}
         {formula && (
           <div className="trust-row">
-            <span className="trust-row-label">Company input provenance{provenanceFromDb ? "" : " (derived)"}</span>
+            <span className="trust-row-label">Company input provenance</span>
             <div className="trust-row-value">
               {provenanceFromDb ? (
                 dbProvenance.map((p) => (
@@ -6181,12 +6176,8 @@ function TrustAuditPanel({
                       : ""}
                   </span>
                 ))
-              ) : formulaInputRows.length > 0 ? (
-                formulaInputRows.map((r) => (
-                  <span key={r.label} className="trust-row-note">{r.label}: {r.prov}</span>
-                ))
               ) : (
-                <span className="trust-row-note">per-input provenance unavailable; shared demo calibration used.</span>
+                <span className="trust-row-note">Input provenance unavailable — issue requires audit.</span>
               )}
             </div>
           </div>
