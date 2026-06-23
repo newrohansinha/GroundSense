@@ -78,9 +78,21 @@ export default function SchedulerStatusCard({
   const scheduleNeverSucceeded = enabled && !scheduledSuccessEver;
   const lastScheduledFailed = lastScheduled?.status === "failed";
 
+  // Staged scheduled runs are accepted instantly and then advanced stage-by-stage
+  // by the worker, so the last scheduled run can be in-flight (queued/running).
+  const scheduledInFlight = lastScheduled?.status === "running" || lastScheduled?.status === "queued";
+  const scheduledHeartbeatMs = lastScheduled?.heartbeat_at ? Date.now() - new Date(lastScheduled.heartbeat_at).getTime() : null;
+  // Accepted but the worker hasn't advanced in a while → the staged worker may be
+  // stuck (it normally heartbeats every stage/chunk, well under a minute apart).
+  const scheduledWorkerStalled = scheduledInFlight && scheduledHeartbeatMs != null && scheduledHeartbeatMs > 6 * 60_000;
+  // Detect the old synchronous-OOM signature if it ever recurs.
+  const scheduledResourceLimit = /WORKER_RESOURCE_LIMIT|546/i.test(lastScheduled?.error_message ?? "");
+
   // Honest one-liner for the scheduled path's last result.
   const scheduledLine = !lastScheduled
     ? "No scheduled run has executed yet"
+    : scheduledInFlight
+    ? `${lastScheduled.status === "queued" ? "Queued" : "Running"} — ${lastScheduled.current_stage_label ?? "working…"}${typeof lastScheduled.progress_pct === "number" ? ` · ${lastScheduled.progress_pct}%` : ""}`
     : lastScheduled.status === "failed"
     ? `Failed — ${lastScheduled.error_message ?? "see history"}`
     : lastScheduled.status === "skipped"
@@ -138,24 +150,38 @@ export default function SchedulerStatusCard({
         </div>
         <div>
           <p className="gs-sched-k">Last scheduled run</p>
-          <p className="gs-sched-v" style={lastScheduledFailed ? { color: "var(--danger)" } : undefined}>
+          <p className="gs-sched-v" style={lastScheduledFailed ? { color: "var(--danger)" } : scheduledInFlight ? { color: "var(--accent)" } : undefined}>
             {scheduledLine}
           </p>
         </div>
-        <div>
-          <p className="gs-sched-k">Result</p>
-          <p className="gs-sched-v">{resultLine}</p>
-        </div>
+        {scheduledInFlight ? (
+          <div>
+            <p className="gs-sched-k">Scheduled worker</p>
+            <p className="gs-sched-v" style={scheduledWorkerStalled ? { color: "var(--danger)" } : undefined}>
+              {lastScheduled?.current_stage_index && lastScheduled?.total_stages ? `Stage ${lastScheduled.current_stage_index}/${lastScheduled.total_stages} · ` : ""}
+              heartbeat {relative(lastScheduled?.heartbeat_at ?? null)}
+            </p>
+          </div>
+        ) : (
+          <div>
+            <p className="gs-sched-k">Result</p>
+            <p className="gs-sched-v">{resultLine}</p>
+          </div>
+        )}
         <div>
           <p className="gs-sched-k">Next scheduled</p>
           <p className="gs-sched-v">{enabled ? nextLabel(status?.nextRunIso ?? null) : "Paused"}</p>
         </div>
       </div>
 
-      {(scheduleNeverSucceeded || lastScheduledFailed) && (
+      {(scheduleNeverSucceeded || lastScheduledFailed || scheduledWorkerStalled) && (
         <div className="dashboard-subtitle" style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, background: "var(--danger-bg)", border: "1px solid var(--danger-border, var(--danger))" }}>
           <b style={{ color: "var(--danger)" }}>⚠ Scheduled automation needs attention</b> —{" "}
-          {scheduleNeverSucceeded
+          {scheduledWorkerStalled
+            ? `the scheduled run was accepted but the staged worker has not advanced (heartbeat ${relative(lastScheduled?.heartbeat_at ?? null)}). The every-minute worker should resume it; if it stays stuck, check the continue-intelligence-run logs.`
+            : scheduledResourceLimit
+            ? `the last scheduled run hit a worker resource limit (${lastScheduled?.error_message}). Scheduled runs should use the staged worker — verify scheduled-intelligence-run is the enqueue version.`
+            : scheduleNeverSucceeded
             ? "the schedule is enabled but no scheduled run has ever completed. The daily run history below will confirm once the next 10:00 UTC run succeeds."
             : `the last scheduled run failed${lastScheduled?.error_message ? ` (${lastScheduled.error_message})` : ""}. Check run history for details.`}
         </div>

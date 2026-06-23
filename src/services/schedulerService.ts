@@ -104,8 +104,10 @@ export type SchedulerStatus = {
   lastRun: RunSummary | null;
   // The most recent run whose trigger_type is "scheduled" (the daily cron),
   // tracked separately from lastRun (which may be a manual run) so the card can
-  // honestly report whether the AUTOMATED path is actually working.
-  lastScheduledRun: RunSummary | null;
+  // honestly report whether the AUTOMATED path is actually working. Carries the
+  // staged-worker progress fields (current_stage_label, heartbeat_at) so the card
+  // can show live stage + heartbeat for an in-flight scheduled run.
+  lastScheduledRun: (RunSummary & Partial<RunProgress>) | null;
   // True iff at least one scheduled run has ever reached completed /
   // completed_with_warnings. Spans all history (not just recentRuns) so the card
   // can warn "schedule enabled but never succeeded" even when manual runs fill
@@ -212,7 +214,7 @@ export async function getSchedulerStatus(companyId: string | null): Promise<Sche
 
   const config = (cfgRows?.[0] as SchedulerConfig) ?? null;
   const recentRuns = (runRows as (RunSummary & Partial<RunProgress>)[]) ?? [];
-  const lastScheduledRun = (schedRows?.[0] as RunSummary) ?? null;
+  const lastScheduledRun = (schedRows?.[0] as RunSummary & Partial<RunProgress>) ?? null;
   const scheduledSuccessEver = (schedSuccessCount ?? 0) > 0;
   // Active = running with a fresh heartbeat (stale ones were just expired above).
   const freshCutoff = Date.now() - STALE_RUN_MINUTES * 60_000;
