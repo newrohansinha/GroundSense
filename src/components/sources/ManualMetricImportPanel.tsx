@@ -66,7 +66,7 @@ export default function ManualMetricImportPanel({ companyId, fixedCategory, onAp
       const dupNote = res.updated > 0 ? `, ${res.updated} updated` : "";
       const persistNote = res.persisted === "supabase" ? "" : " (saved locally — DB unavailable)";
       setStatus(
-        `Applied ${res.added + res.updated} metric${res.added + res.updated === 1 ? "" : "s"} (${res.added} new${dupNote}). ${res.shocksCreated} verified shock${res.shocksCreated === 1 ? "" : "s"} created from structured metrics.${persistNote}`
+        `Applied ${res.added + res.updated} metric${res.added + res.updated === 1 ? "" : "s"} (${res.added} new${dupNote}). ${res.shocksCreated} numeric shock${res.shocksCreated === 1 ? "" : "s"} created from structured metrics.${persistNote}`
       );
       setReport(null);
       setText("");
@@ -139,7 +139,7 @@ export default function ManualMetricImportPanel({ companyId, fixedCategory, onAp
                   {applying ? "Applying…" : `Apply ${report.validRows} metric${report.validRows === 1 ? "" : "s"}`}
                 </button>
                 <button className="smi-btn smi-btn-text" onClick={() => { setReport(null); setStatus("Import discarded."); }}>Discard</button>
-                <span className="smi-apply-note">Verified shocks are derived from valid structured metrics.</span>
+                <span className="smi-apply-note">Numeric shocks are derived from valid structured metrics.</span>
               </div>
             </>
           )}

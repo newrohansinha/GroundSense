@@ -38,11 +38,29 @@ type IssueLike = {
   impact_high?: number | null;
   revenue_low?: number | null;
   revenue_high?: number | null;
+  // Canonical numeric-shock-ledger basis fields (single source of truth).
+  numeric_basis_type?: string | null;
+  numeric_basis_value?: number | null;
+  numeric_basis_unit?: string | null;
+  numeric_basis_source_label?: string | null;
+  numeric_basis_source_url?: string | null;
+  numeric_basis_snippet?: string | null;
+  methodology?: Record<string, unknown> | null;
 };
+
+const METRIC_BACKED = new Set([
+  "official_structured_metric",
+  "manual_structured_metric",
+  "company_structured_metric",
+  "article_numeric_claim",
+]);
 
 // ── Rounding (no fake precision) ──────────────────────────────────────────────
 export function roundExec(value: number): number {
   const abs = Math.abs(value);
+  // Finer granularity below $250K so small but real estimates aren't distorted
+  // (e.g. $62K must read ~$60K, not ~$50K). Larger tiers keep coarse rounding.
+  if (abs < 250_000) return Math.round(value / 5_000) * 5_000;           // nearest $5K
   if (abs < 1_000_000) return Math.round(value / 25_000) * 25_000;       // nearest $25K
   if (abs < 10_000_000) return Math.round(value / 100_000) * 100_000;    // nearest $0.1M
   return Math.round(value / 1_000_000) * 1_000_000;                       // nearest $1M
@@ -64,158 +82,59 @@ export function formatExecutiveEstimate(value: number | null): string {
   return `~${fmtRounded(value)}`;
 }
 
-function fmtMoneyPlain(n: number): string {
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(1)}B`;
-  if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `$${Math.round(n / 1_000)}K`;
-  return `$${Math.round(n)}`;
-}
-
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
 }
 
-function bestShock(shocks: VerifiedShockRow[], pred: (s: VerifiedShockRow) => boolean): VerifiedShockRow | null {
-  return shocks.filter(pred).sort((a, b) => (b.confidence_score ?? 0) - (a.confidence_score ?? 0))[0] ?? null;
-}
-
 // ── Per-issue executive estimate ──────────────────────────────────────────────
 export function getExecutiveImpactEstimate(
   issue: IssueLike,
-  verifiedShocks: VerifiedShockRow[],
-  calibration: CompanyCalibrationInput | null
+  _verifiedShocks: VerifiedShockRow[],
+  _calibration: CompanyCalibrationInput | null
 ): ExecutiveEstimate {
   const title = issue.risk_title ?? issue.title ?? "";
   const kind = inferIssueKind(title, issue.issue_category);
-  const cal = (calibration ?? {}) as Record<string, unknown>;
 
-  if (kind === "freight") return freightEstimate(issue, verifiedShocks, cal);
-  if (kind === "tariff") return tariffEstimate(issue, verifiedShocks, cal);
-  if (kind === "copper" || kind === "aluminum") return commodityCandidateEstimate(kind);
-  if (kind === "demand") return demandEstimate();
-  return genericEstimate(issue, kind);
-}
+  // ── Canonical path: the numeric_shock-ledger basis stored on the row is the
+  // single source of truth. The displayed dollar = stored impact_high, the
+  // displayed formula = methodology.formula, the source = numeric_basis_source.
+  // This is the SAME number the risk card, brief, and DB all use — no recompute
+  // from the legacy verified_shocks table (which is empty and produced the
+  // "scenario assumption / +0.8%" contradictions).
+  const nbType = String(issue.numeric_basis_type ?? "no_numeric_basis");
+  const high = num(issue.impact_high);
+  const meth = (issue.methodology ?? {}) as Record<string, unknown>;
+  const formula = typeof meth.formula === "string" && meth.formula ? (meth.formula as string) : null;
+  const nbValue = num(issue.numeric_basis_value);
+  const nbUnit = issue.numeric_basis_unit ?? "pct";
+  const srcLabel = issue.numeric_basis_source_label ?? null;
+  const snippet = issue.numeric_basis_snippet ?? null;
 
-function freightEstimate(issue: IssueLike, shocks: VerifiedShockRow[], cal: Record<string, unknown>): ExecutiveEstimate {
-  const ppi = bestShock(shocks, (s) => /freight|logistic/i.test(s.driver ?? "") && s.primary_source_id === "bls_public_api");
-  const spend = num(cal.freight_spend);
-  const spotPct = num(cal.freight_spot_rate_exposure_pct);
-  const move = ppi ? num(ppi.percent_change) : null;
-
-  if (spend && spotPct !== null && move !== null) {
-    const value = spend * (spotPct / 100) * (move / 100);
+  if (METRIC_BACKED.has(nbType) && high !== null && high !== 0) {
+    const official = nbType !== "article_numeric_claim";
+    const changeStr = nbValue !== null ? `${nbValue > 0 ? "+" : ""}${nbValue}${nbUnit === "pct" ? "%" : nbUnit}` : "";
     return {
-      kind: "freight",
-      value,
+      kind,
+      value: high,
       isDollar: true,
-      display: formatExecutiveEstimate(value),
-      title: "Freight logistics pressure",
-      sourceLabel: "Verified public metric + company calibration",
-      confidence: "Medium",
-      calculation: `${fmtMoneyPlain(spend)} freight spend × ${spotPct}% spot exposure × ${move}% BLS freight/logistics PPI move`,
+      display: formatExecutiveEstimate(high),
+      title,
+      sourceLabel: official ? `Official metric · ${srcLabel ?? "source"}` : `Article-claimed · ${srcLabel ?? "source"}`,
+      confidence: official ? "Medium-high" : "Low",
+      calculation: formula,
       sources: [
-        { label: "External", value: `BLS Freight Transportation Arrangement PPI${ppi?.period_end ? ` (${ppi.period_end})` : ""}` },
-        { label: "Internal", value: "Calibrated freight lane data" },
+        { label: official ? "Official metric" : "Article claim", value: `${srcLabel ?? "source"}${changeStr ? ` · ${changeStr}` : ""}` },
+        ...(snippet ? [{ label: "Basis", value: String(snippet).slice(0, 140) }] : []),
       ],
-      caveat: "Public logistics PPI support; lane-specific freight index not configured — not a lane-verified freight rate.",
+      caveat: official ? null : "Article-claimed metric — validation required before treating as confirmed.",
     };
   }
-  // Fallback — scenario midpoint, clearly labeled.
-  return scenarioFallback(issue, "freight", "Freight logistics pressure", "Lane and BLS PPI calibration incomplete — using scenario assumption.");
-}
 
-// Pass-through coverage %, checked across known field names, with an explicit demo default.
-function resolvePassThrough(cal: Record<string, unknown>): { pct: number; isAssumption: boolean } {
-  const fields = [
-    "tariff_pass_through_pct",
-    "commodity_pass_through_pct",
-    "supplier_pass_through_pct",
-    "pass_through_pct",
-    "pass_through_coverage_pct",
-    "steel_pass_through_pct",
-    "tariff_pass_through_coverage_pct",
-  ];
-  for (const f of fields) {
-    const v = num(cal[f]);
-    if (v !== null) return { pct: v, isAssumption: false };
-  }
-  // Demo/scenario default (matches the Scenario Editor's 80%) — labeled as an assumption.
-  return { pct: 80, isAssumption: true };
-}
-
-function tariffEstimate(issue: IssueLike, shocks: VerifiedShockRow[], cal: Record<string, unknown>): ExecutiveEstimate {
-  const tariff = bestShock(
-    shocks,
-    (s) =>
-      (/tariff|trade|duty/i.test(s.driver ?? "") || (s as { shock_type?: string }).shock_type === "tariff_rate_change") &&
-      s.verification_status !== "scenario_assumption_only" &&
-      s.verification_status !== "article_claim_only"
-  );
-  const steelSpend = num(cal.steel_spend);
-  const baseline = tariff ? num(tariff.baseline_value) : null;
-  const current = tariff ? num(tariff.current_value) : null;
-  const ppReduction = baseline !== null && current !== null ? baseline - current : null;
-
-  // Do NOT fall back to scenario when a verified tariff shock + exposure base + delta exist.
-  // Pass-through always resolves (with a labeled demo default) so a missing field never
-  // demotes a verified estimate to scenario.
-  if (tariff && steelSpend && ppReduction !== null) {
-    const { pct: passThrough, isAssumption } = resolvePassThrough(cal);
-    const unpassed = 1 - passThrough / 100;
-    const value = steelSpend * unpassed * (ppReduction / 100);
-    const sources = [
-      { label: "External", value: `Manual structured tariff metric, ${baseline}% → ${current}%, USITC HTS / Federal Register` },
-      { label: "Internal", value: "Imported supplier / procurement data, 5 supplier rows" },
-    ];
-    if (isAssumption) sources.push({ label: "Assumption", value: `${passThrough}% pass-through coverage (scenario/demo assumption)` });
-    return {
-      kind: "tariff",
-      value,
-      isDollar: true,
-      display: formatExecutiveEstimate(value),
-      title: "Tariff relief validation",
-      sourceLabel: "Verified manual tariff metric + supplier-grounded exposure",
-      confidence: "Medium-high",
-      calculation: `${fmtMoneyPlain(steelSpend)} steel-linked import exposure × ${Math.round(unpassed * 100)}% unpassed exposure × ${ppReduction} percentage-point tariff-rate reduction`,
-      sources,
-      caveat: "Realized savings depend on supplier landed-cost updates, open PO timing, and country-of-origin validation.",
-    };
-  }
-  return scenarioFallback(issue, "tariff", "Tariff relief validation", "No verified tariff metric available — using scenario assumption.");
-}
-
-function commodityCandidateEstimate(kind: IssueKind): ExecutiveEstimate {
-  const metal = kind === "copper" ? "copper" : "aluminum";
-  return {
-    kind,
-    value: null,
-    isDollar: false,
-    display: "Needs validation",
-    title: `${metal[0].toUpperCase()}${metal.slice(1)} price signal`,
-    sourceLabel: "Verified public signal, exposure unmapped",
-    confidence: "Needs validation",
-    calculation: null,
-    sources: [{ label: "External", value: `BLS ${metal} PPI (verified public signal)` }],
-    caveat: `Public ${metal} price signal verified, but company-specific ${metal} exposure is not sufficiently mapped — not published as an executive forecast.`,
-  };
-}
-
-function demandEstimate(): ExecutiveEstimate {
-  return {
-    kind: "demand",
-    value: null,
-    isDollar: false,
-    display: "Needs validation",
-    title: "Demand signal",
-    sourceLabel: "Macro context only",
-    confidence: "Needs validation",
-    calculation: null,
-    sources: [{ label: "Context", value: "World Bank macro / manufacturing indicators" }],
-    caveat: "Macro context only — no company-specific demand upside until CRM/internal calibration and the quality gate support it.",
-  };
+  // No numeric basis → genuinely scenario / needs validation. Published issues
+  // never reach here (the gate requires a numeric basis); only watch items do.
+  return genericEstimate(issue, kind);
 }
 
 function scenarioFallback(issue: IssueLike, kind: IssueKind, title: string, why: string): ExecutiveEstimate {

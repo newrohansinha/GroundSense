@@ -77,7 +77,9 @@ function PathLane({
       <div className="gxg-lane-head">
         <span className="gxg-lane-title">{path.label}</span>
         <span className="gxg-lane-type">{path.issueType}</span>
-        <span className="gxg-lane-impact">{path.impactDisplay} value at stake</span>
+        <span className="gxg-lane-impact">
+          {path.impactDisplay} {/operating change|favorable|relief/i.test(path.issueType) ? "favorable impact" : "value at stake"}
+        </span>
       </div>
       <div className="gxg-flow" role="list">
         {path.nodes.map((node, i) => (
@@ -165,7 +167,7 @@ export default function CompanyExposureGraph({
       <style>{EXPOSURE_GRAPH_CSS}</style>
 
       <p className="gxg-subhead">
-        Verified shocks mapped to company exposure, calculations, business impact, and actions.
+        Numeric shocks mapped to company exposure, calculations, business impact, and actions.
       </p>
 
       {/* Summary chips */}
@@ -175,9 +177,15 @@ export default function CompanyExposureGraph({
           <span className="gxg-chip-label">Active paths</span>
         </div>
         <div className="gxg-chip gxg-chip-primary">
-          <span className="gxg-chip-value">{model.summary.valueAtStake}</span>
-          <span className="gxg-chip-label">Quantified value at stake</span>
+          <span className="gxg-chip-value">{model.summary.downsideAtStake}</span>
+          <span className="gxg-chip-label">Downside value at stake</span>
         </div>
+        {model.summary.hasFavorable && (
+          <div className="gxg-chip gxg-chip-favorable">
+            <span className="gxg-chip-value">{model.summary.favorableRelief}</span>
+            <span className="gxg-chip-label">Favorable relief</span>
+          </div>
+        )}
         <div className="gxg-chip">
           <span className="gxg-chip-value">{model.summary.blockedCount}</span>
           <span className="gxg-chip-label">Blocked candidates</span>
@@ -225,16 +233,12 @@ export default function CompanyExposureGraph({
               ))}
             </div>
             {model.activePaths.length === 0 ? (
-              <p className="gxg-empty">No active exposure paths — verified shocks not yet mapped.</p>
+              <p className="gxg-empty">No active exposure paths — numeric shocks not yet mapped.</p>
             ) : (
               model.activePaths.map((p) => (
                 <PathLane key={p.id} path={p} selectedId={selected?.id ?? null} onSelect={selectNode} />
               ))
             )}
-            <p className="gxg-foot">
-              Steel, aluminum, and copper price signals support the tariff path but are not separate
-              dollar estimates — see the Supporting signals tab.
-            </p>
           </div>
           {selected && <DetailPanel node={selected} onClose={() => setSelected(null)} />}
         </div>

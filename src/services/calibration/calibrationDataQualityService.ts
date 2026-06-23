@@ -245,6 +245,16 @@ function basisFor(domain: DomainKey, rows: DomainRow[]): string {
   return `${rows.length} ${def.shortLabel.toLowerCase()} row${rows.length === 1 ? "" : "s"} imported/entered`;
 }
 
+// Anchors the Financial domain MUST have before it can claim "Company-calibrated".
+// A partially-missing weighted score could otherwise still clear the 80 threshold
+// while a required anchor is absent — an executive-trust contradiction.
+const FINANCIAL_REQUIRED_ANCHORS: { key: string; label: string }[] = [
+  { key: "revenue", label: "Revenue" },
+  { key: "gross_margin_pct", label: "Gross margin %" },
+  { key: "freight_spend", label: "Freight spend" },
+  { key: "commodity_spend", label: "Commodity spend (steel / copper / aluminum)" },
+];
+
 export function buildDomainScore(
   domain: DomainKey,
   rows: DomainRow[],
@@ -253,9 +263,21 @@ export function buildDomainScore(
   lastUpdated: string | null
 ): DomainScore {
   const def = getDomain(domain);
-  const score = scoreDomain(domain, rows);
+  let score = scoreDomain(domain, rows);
   const calibrated = domainCalibratedFactorCount(domain, rows);
   const required = domainFactorCount(domain);
+  let missingInputs = getMissingInputs(domain, rows);
+
+  // Financial-anchor consistency: never label "Company-calibrated" (≥80) while a
+  // required financial anchor is missing. Cap below the threshold and list the gaps.
+  if (domain === "financial" && rows.length > 0) {
+    const missingAnchors = FINANCIAL_REQUIRED_ANCHORS.filter((a) => columnCoverage(rows, a.key) < 0.5);
+    if (missingAnchors.length > 0) {
+      score = Math.min(score, 70);
+      const anchorLabels = missingAnchors.map((a) => a.label);
+      missingInputs = Array.from(new Set([...anchorLabels, ...missingInputs])).slice(0, 6);
+    }
+  }
 
   return {
     domain,
@@ -267,7 +289,7 @@ export function buildDomainScore(
     sourceCount,
     inputsCalibrated: calibrated,
     inputsRequired: required,
-    missingInputs: getMissingInputs(domain, rows),
+    missingInputs,
     basis: basisFor(domain, rows),
     affects: def.affects,
     nextBestAction: def.nextBestAction,

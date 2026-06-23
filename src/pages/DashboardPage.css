@@ -1112,6 +1112,12 @@
   border-color: var(--warning);
 }
 
+.model-status-article {
+  color: var(--accent-hover);
+  background: color-mix(in srgb, var(--warning-bg) 60%, transparent);
+  border-color: var(--warning);
+}
+
 .model-status-missing {
   color: var(--danger);
   background: var(--danger-bg);
@@ -2483,6 +2489,15 @@
   background: var(--bg-surface-muted);
   color: var(--text-secondary);
 }
+.watchlist-unsized-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--bg-surface-muted);
+  color: var(--text-muted);
+  font-style: italic;
+}
 
 .watchlist-toggle {
   white-space: nowrap;
@@ -3770,3 +3785,34 @@
   color: var(--text-primary);
   font-size: 13.5px;
 }
+.gs-operator-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  margin-bottom: 16px;
+  border: 1px solid var(--warning, #b45309);
+  background: var(--warning-bg, rgba(180, 83, 9, 0.12));
+  border-radius: 12px;
+  font-size: 13px;
+}
+.gs-operator-badge {
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 11.5px;
+  color: var(--warning, #b45309);
+}
+.gs-operator-note { color: var(--text-muted); flex: 1; min-width: 180px; }
+.gs-operator-leave {
+  font-size: 12.5px;
+  font-weight: 650;
+  padding: 5px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--warning, #b45309);
+  background: transparent;
+  color: var(--warning, #b45309);
+  cursor: pointer;
+}
+.gs-operator-leave:hover { background: var(--warning, #b45309); color: var(--text-inverse, #fff); }

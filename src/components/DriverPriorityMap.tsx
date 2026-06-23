@@ -98,7 +98,9 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
     ? {
         Act: drivers.filter((d) => isPrimaryActive(d)).length,
         Support: drivers.filter((d) => isSupportRow(d)).length,
-        Watch: drivers.filter((d) => !isPrimaryActive(d) && !isSupportRow(d) && d.status === "Watch").length,
+        // Watch reflects the full watchlist (passed in), not just published-issue
+        // drivers — otherwise the map shows "0 Watch" while the watchlist has items.
+        Watch: watchCount ?? drivers.filter((d) => !isPrimaryActive(d) && !isSupportRow(d) && d.status === "Watch").length,
       }
     : {
         Act: drivers.filter((d) => d.status === "Act").length,
@@ -299,7 +301,7 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
           <h3 className="gs-dpm-title">Driver Priority Map</h3>
           <p className="gs-dpm-subtitle">
             {publishedIssueCount !== undefined
-              ? `From ${publishedIssueCount} published issue${publishedIssueCount !== 1 ? "s" : ""} — one issue can affect multiple drivers`
+              ? `Published issue drivers only · from ${publishedIssueCount} published issue${publishedIssueCount !== 1 ? "s" : ""} (Watch reflects the full watchlist)`
               : "Operating drivers ranked by current exposure and urgency"}
           </p>
         </div>
@@ -396,7 +398,9 @@ export default function DriverPriorityMap({ drivers, topDriver, watchCount, publ
                 <td>
                   <span className="gs-driver-reason">
                     {isSupportRow(driver)
-                      ? "Supporting signal included in tariff validation; no separate dollar estimate."
+                      ? (driver.key === "supplier" || /supplier|concentration/i.test(String(driver.reason ?? ""))
+                          ? "Potential supplier dependency concern; requires supplier concentration validation."
+                          : "Supporting signal; corroborates the primary driver — no separate dollar estimate.")
                       : primaryActive
                       ? "Source-backed operating issue with an open validation action."
                       : execReason(driver.reason, execMode)}

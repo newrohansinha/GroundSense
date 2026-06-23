@@ -350,7 +350,7 @@ export default function ScenarioEditor({ mode: initialMode = "freight", calibrat
               <span className="gs-scenario-result-value">{fmt(cr.exposureHigh)}</span>
             </div>
             <p className="gs-scenario-caveat">
-              Evidence-backed tariff rate change. Exposure base remains inferred from company model. Country-of-origin and PO-level data would improve accuracy.
+              Official metric-backed tariff rate change. Exposure base remains inferred from company model. Country-of-origin and PO-level data would improve accuracy.
             </p>
           </div>
         </div>

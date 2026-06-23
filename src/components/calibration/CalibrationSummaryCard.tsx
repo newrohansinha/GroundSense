@@ -1,9 +1,15 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import type { UseCalibrationWorkbench } from "../../services/calibration/useCalibrationWorkbench";
 import type { DomainKey } from "../../services/calibration/types";
 
 type Props = {
   controller: UseCalibrationWorkbench;
+  // Published-issue coverage and watchlist blockers are tracked separately from
+  // all-model calibration coverage so the card never says "0 blocked" while
+  // watchlist items are blocked by missing data.
+  publishedCount?: number;
+  watchlistBlocked?: number;
 };
 
 // Domains surfaced as chips on the dashboard (the ones that map to live issues).
@@ -22,10 +28,11 @@ function reliabilityTone(score: number): string {
   return "none";
 }
 
-export default function CalibrationSummaryCard({ controller }: Props) {
+export default function CalibrationSummaryCard({ controller, publishedCount = 0, watchlistBlocked = 0 }: Props) {
   const { workbench, persistence, state } = controller;
   const { summary, domainScores } = workbench;
   const scoreByDomain = (k: DomainKey) => domainScores.find((d) => d.domain === k);
+  const [showDetails, setShowDetails] = useState(false);
 
   // Which live-issue domains are still completely inferred (no rows)?
   const inferredDomains: string[] = [];
@@ -46,14 +53,20 @@ export default function CalibrationSummaryCard({ controller }: Props) {
       </div>
 
       <div className="gs-calsum-stats">
-        <Stat value={`${summary.modelReliability}%`} label="Calibration coverage" tone={reliabilityTone(summary.modelReliability)} />
-        <Stat value={`${summary.inputsCalibrated}/${summary.inputsRequired}`} label="Inputs calibrated" />
-        <Stat value={String(summary.importedDataSources)} label="Data sources" />
+        <Stat value={`${publishedCount}/${publishedCount}`} label="Published-issue coverage" tone={publishedCount > 0 ? "high" : undefined} />
+        <Stat value={`${summary.modelReliability}%`} label="All-model calibration coverage" tone={reliabilityTone(summary.modelReliability)} />
+        <Stat value={`${summary.inputsCalibrated}/${summary.inputsRequired}`} label="All-model inputs calibrated" />
         <Stat value={String(summary.inferredAssumptions)} label="Inferred remaining" />
         <Stat value={String(summary.estimatesImproved)} label="Estimates improved" />
-        <Stat value={String(summary.blockedByMissingData)} label="Blocked by data" />
+        <Stat value={String(watchlistBlocked)} label="Watchlist blocked by missing data" tone={watchlistBlocked > 0 ? "mid" : undefined} />
       </div>
 
+      <button className="gs-calsum-details-toggle" onClick={() => setShowDetails((v) => !v)}>
+        {showDetails ? "▲ Hide per-domain detail" : "▼ Show per-domain detail"}
+      </button>
+
+      {showDetails && (
+      <>
       <div className="gs-calsum-chips">
         {CHIP_DOMAINS.map(({ key, label }) => {
           const d = scoreByDomain(key);
@@ -76,6 +89,8 @@ export default function CalibrationSummaryCard({ controller }: Props) {
             Recommended next action: upload freight and supplier data in the Calibration Center to ground these ranges.
           </p>
         </div>
+      )}
+      </>
       )}
 
       <div className="gs-calsum-actions">
@@ -121,6 +136,7 @@ const CSS = `
 .gs-calsum-tone-mid { color: var(--warning); }
 .gs-calsum-tone-low { color: var(--accent-hover); }
 .gs-calsum-tone-none { color: var(--danger); }
+.gs-calsum-details-toggle { background: none; border: none; color: var(--accent-hover); font-size: 12px; font-weight: 650; cursor: pointer; padding: 0 0 10px; }
 .gs-calsum-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
 .gs-calsum-chip { display: inline-flex; flex-direction: column; gap: 1px; padding: 6px 12px; border-radius: 10px; border: 1px solid var(--border-subtle); background: var(--bg-surface-muted); }
 .gs-calsum-chip-label { font-size: 12px; font-weight: 700; }

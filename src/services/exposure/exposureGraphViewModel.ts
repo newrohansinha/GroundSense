@@ -103,6 +103,10 @@ export type ExposureGraphModel = {
   summary: {
     activeCount: number;
     valueAtStake: string;
+    // Direction-split totals — downside risk and favorable relief are NEVER combined.
+    downsideAtStake: string;
+    favorableRelief: string;
+    hasFavorable: boolean;
     blockedCount: number;
     supportingCount: number;
   };
@@ -135,6 +139,9 @@ export type BuildExposureGraphInput = {
   blockedCandidateTitles: string[];
   /** Canonical total (formatExecutiveEstimate of the published risk estimates). */
   valueAtStakeDisplay: string;
+  /** Direction-split executive totals (downside risk vs favorable relief — never combined). */
+  downsideAtStakeDisplay?: string;
+  favorableReliefDisplay?: string;
   freightAction?: ActionMeta;
   tariffAction?: ActionMeta;
   /** Published active issues not covered by the canonical freight/tariff paths. */
@@ -372,7 +379,7 @@ function buildTariffPath(input: BuildExposureGraphInput): ExposurePath | null {
       id: "tariff-impact",
       type: "business_impact",
       column: 4,
-      title: "Tariff relief value at stake",
+      title: "Tariff relief favorable impact",
       valueLabel: execTariff.display,
       status: "pending",
       statusLabel: "Validation pending",
@@ -421,7 +428,7 @@ function buildIssuePath(issue: IssuePathInput): ExposurePath {
       subtitle: issue.sourceLabel ?? "Company-evaluated external signal",
       sourceLabel: issue.sourceLabel ?? undefined,
       status: evidenceBacked ? "verified" : "context",
-      statusLabel: evidenceBacked ? "Evidence-backed" : "Scenario-modeled",
+      statusLabel: evidenceBacked ? "Official metric-backed" : "Scenario-modeled",
       issueId: issue.id,
       driver: issue.driver,
     },
@@ -448,7 +455,7 @@ function buildIssuePath(issue: IssuePathInput): ExposurePath {
       subtitle: issue.calculation ?? undefined,
       valueLabel: issue.impactDisplay,
       status: "estimate",
-      statusLabel: evidenceBacked ? "Evidence-backed estimate" : "Scenario-modeled estimate",
+      statusLabel: evidenceBacked ? "Official metric-backed estimate" : "Scenario-modeled estimate",
       issueId: issue.id,
       driver: issue.driver,
     },
@@ -522,29 +529,13 @@ function linearEdges(nodes: ExposureGraphNode[], prefix: string): ExposureGraphE
 }
 
 // ── supporting signals (context only — never dollarized) ─────────────────────────
-function buildSupportingSignals(shocks: VerifiedShockRow[]): SupportingSignal[] {
+function buildSupportingSignals(_shocks: VerifiedShockRow[]): SupportingSignal[] {
   const signals: SupportingSignal[] = [];
-  const has = (re: RegExp) =>
-    shocks.some((s) => re.test(s.driver ?? "") && s.primary_source_id === "bls_public_api");
 
-  if (has(/steel/i)) {
-    signals.push({
-      id: "support-steel",
-      label: "BLS steel PPI",
-      detail: "Verified public price context — included in tariff validation; no separate dollar estimate.",
-      status: "context",
-      statusLabel: "Verified context",
-    });
-  }
-  if (has(/copper|aluminum|aluminium/i)) {
-    signals.push({
-      id: "support-metals",
-      label: "BLS copper / aluminum PPI",
-      detail: "Verified public price context — requires its own tariff metric before being quantified.",
-      status: "context",
-      statusLabel: "Verified context",
-    });
-  }
+  // Steel / copper / aluminum PPI are no longer "supporting context" — each is now a
+  // separately published commodity-cost issue with its own dollar estimate, so they are
+  // not duplicated here as context (and never carry tariff-validation wording).
+
   // Macro / news / financial context that must never drive numeric exposure.
   signals.push(
     {
@@ -624,17 +615,14 @@ function buildBlockedLanes(titles: string[]): BlockedLane[] {
 
 // ── public adapter ────────────────────────────────────────────────────────────
 export function buildExposureGraphViewModel(input: BuildExposureGraphInput): ExposureGraphModel {
-  const canonicalPaths = [buildFreightPath(input), buildTariffPath(input)].filter(
-    (p): p is ExposurePath => p !== null
-  );
-  // Add a path for every published active issue whose driver isn't already
-  // covered by a canonical path — so an article-derived steel/supplier risk is
-  // never published with 0 exposure paths.
-  const coveredDrivers = new Set(canonicalPaths.map((p) => p.id));
-  const issuePaths = (input.publishedIssues ?? [])
-    .filter((iss) => !coveredDrivers.has(iss.driver))
-    .map(buildIssuePath);
-  const activePaths = [...canonicalPaths, ...issuePaths];
+  // Every active path is built from the canonical published issue (numeric_shock
+  // ledger basis) via buildIssuePath — no hardcoded freight/tariff scenario nodes.
+  // This guarantees the graph's source + % + formula match the risk card and DB.
+  // NOTE: buildFreightPath/buildTariffPath are legacy hardcoded builders (with the
+  // old "+0.8%"/"25%→15%" scenario nodes) and are NO LONGER used — retained only
+  // for reference; never call them, they contradict the numeric ledger.
+  void buildFreightPath; void buildTariffPath;
+  const activePaths = (input.publishedIssues ?? []).map(buildIssuePath);
 
   const supportingSignals = buildSupportingSignals(input.verifiedShocks);
   const blockedLanes = buildBlockedLanes(input.blockedCandidateTitles);
@@ -646,6 +634,9 @@ export function buildExposureGraphViewModel(input: BuildExposureGraphInput): Exp
     summary: {
       activeCount: activePaths.length,
       valueAtStake: input.valueAtStakeDisplay,
+      downsideAtStake: input.downsideAtStakeDisplay ?? input.valueAtStakeDisplay,
+      favorableRelief: input.favorableReliefDisplay ?? "—",
+      hasFavorable: !!input.favorableReliefDisplay && input.favorableReliefDisplay !== "—",
       blockedCount: blockedLanes.length,
       supportingCount: supportingSignals.length,
     },

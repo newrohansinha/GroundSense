@@ -11,6 +11,9 @@ import type { User } from "@supabase/supabase-js";
 
 export const ACTIVE_COMPANY_KEY = "groundsense_company_id";
 export const DEMO_FLAG_KEY = "groundsense_demo";
+// Operator/admin mode is an EXPLICIT opt-in. The safe default is buyer/demo, which
+// shows no pipeline/admin/scheduler controls. Operators enable it via ?operator=1.
+export const OPERATOR_FLAG_KEY = "groundsense_operator";
 
 // The live Fastenal demo workspace (3 risks, 2 actions, 15 supplier + 15 freight
 // rows). Loaded by the public "View demo" path.
@@ -41,6 +44,8 @@ export function setActiveCompany(companyId: string): void {
   try {
     localStorage.setItem(ACTIVE_COMPANY_KEY, companyId);
     localStorage.removeItem(DEMO_FLAG_KEY);
+    // Buyer is the default for a freshly selected company; operator stays explicit.
+    localStorage.removeItem(OPERATOR_FLAG_KEY);
   } catch {
     /* ignore */
   }
@@ -63,10 +68,75 @@ export function isDemoMode(): boolean {
   }
 }
 
+// ── Permissions: single source of truth for showing operator/admin controls ──
+// Buyer/demo is the safe default (nothing operator-facing). Operator mode is an
+// explicit opt-in and is NEVER on while the demo flag is set. Dashboard,
+// SchedulerStatusCard, and every admin control read from here — no scattered
+// `!isDemoMode()` checks.
+export function isOperatorMode(): boolean {
+  try {
+    if (localStorage.getItem(DEMO_FLAG_KEY) === "1") return false;
+    return localStorage.getItem(OPERATOR_FLAG_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function setOperatorMode(on: boolean): void {
+  try {
+    if (on) localStorage.setItem(OPERATOR_FLAG_KEY, "1");
+    else localStorage.removeItem(OPERATOR_FLAG_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+// Reads ?operator=1 / ?operator=0 from the URL and persists it. Call once on load.
+// In demo mode operator is always forced OFF (and the flag cleared) so a buyer can
+// never get stuck in operator view after previously visiting ?operator=1.
+export function syncOperatorModeFromUrl(): void {
+  try {
+    if (localStorage.getItem(DEMO_FLAG_KEY) === "1") { setOperatorMode(false); return; }
+    const p = new URLSearchParams(window.location.search);
+    const v = p.get("operator");
+    if (v === "1") setOperatorMode(true);
+    else if (v === "0") setOperatorMode(false);
+  } catch {
+    /* ignore */
+  }
+}
+
+// Clears operator mode and reloads the normal buyer view. Used by the
+// "Leave operator mode" control so there is always a one-click exit.
+export function leaveOperatorMode(): void {
+  try {
+    setOperatorMode(false);
+    const url = new URL(window.location.href);
+    url.searchParams.delete("operator");
+    window.location.href = url.pathname + url.search;
+  } catch {
+    /* ignore */
+  }
+}
+
+// ── Single source of truth for buyer-vs-operator UI ──────────────────────────
+// Every operator/admin/pipeline/scheduler/source-audit control reads from these.
+export function canViewAdminControls(): boolean {
+  return isOperatorMode();
+}
+export function canOperatePipeline(): boolean {
+  return isOperatorMode();
+}
+export function canViewSourceAudit(): boolean {
+  return isOperatorMode();
+}
+
 export function enterDemoMode(): void {
   try {
     localStorage.setItem(ACTIVE_COMPANY_KEY, DEMO_COMPANY_ID);
     localStorage.setItem(DEMO_FLAG_KEY, "1");
+    // Demo always overrides operator — clear any lingering operator flag.
+    localStorage.removeItem(OPERATOR_FLAG_KEY);
   } catch {
     /* ignore */
   }

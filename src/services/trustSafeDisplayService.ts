@@ -27,7 +27,16 @@ type IssueLike = {
   impact_high?: number | null;
   revenue_low?: number | null;
   revenue_high?: number | null;
+  numeric_basis_type?: string | null;
 };
+
+// A metric-backed issue (numeric_shock ledger or article claim) must NEVER be
+// shown with the legacy hardcoded scenario copy below — it uses its own stored,
+// truthful fields. Only genuinely scenario/watch issues get the canonical text.
+export function isMetricBacked(issue: IssueLike): boolean {
+  return ["official_structured_metric", "manual_structured_metric", "company_structured_metric", "article_numeric_claim"]
+    .includes(String(issue.numeric_basis_type ?? "no_numeric_basis"));
+}
 
 // ─── Identity helpers ────────────────────────────────────────────────────────
 
@@ -160,45 +169,53 @@ const MANUFACTURING_OPP_WHY_NOW =
 const MANUFACTURING_OPP_DECISION_TRIGGER =
   "Promote to sales campaign only if CRM/account data confirms quote growth, order strength, or customer demand in manufacturing accounts.";
 
-const WATCHLIST_CANADA_STEEL_SUMMARY =
-  "Canada's steel and aluminum protection measures may affect North American supply conditions, but the direction and company-specific impact are not yet clear.";
-
 const WATCHLIST_UPGRADE_TRIGGER =
   "Upgrade to modeled issue if a current source provides a new and incremental percentage, rate, cost, demand, supply, or policy movement tied to Fastenal-relevant inputs.";
 
 // ─── Public display APIs ──────────────────────────────────────────────────
 
 export function getRiskSummary(issue: IssueLike): string {
-  if (isFreightIssue(issue)) return FREIGHT_RISK_SUMMARY;
-  if (isTariffIssue(issue)) return STEEL_TARIFF_RISK_SUMMARY;
-  const raw = String(issue.executive_summary || issue.what_happened || "");
+  if (!isMetricBacked(issue)) {
+    if (isFreightIssue(issue)) return FREIGHT_RISK_SUMMARY;
+    if (isTariffIssue(issue)) return STEEL_TARIFF_RISK_SUMMARY;
+  }
+  const raw = String(issue.business_impact || issue.executive_summary || issue.what_happened || "");
   return stripRejectedNumbers(raw, issue.methodology ?? null);
 }
 
 export function getRiskWhatChanged(issue: IssueLike): string {
-  if (isFreightIssue(issue)) return FREIGHT_WHAT_CHANGED;
-  if (isTariffIssue(issue)) return STEEL_TARIFF_WHAT_CHANGED;
+  if (!isMetricBacked(issue)) {
+    if (isFreightIssue(issue)) return FREIGHT_WHAT_CHANGED;
+    if (isTariffIssue(issue)) return STEEL_TARIFF_WHAT_CHANGED;
+  }
   const raw = String(issue.what_happened || issue.executive_summary || "");
   return stripRejectedNumbers(raw, issue.methodology ?? null);
 }
 
 export function getRiskWhyNow(issue: IssueLike): string {
-  if (isFreightIssue(issue)) return FREIGHT_WHY_NOW;
-  if (isTariffIssue(issue)) return STEEL_TARIFF_WHY_NOW;
+  if (!isMetricBacked(issue)) {
+    if (isFreightIssue(issue)) return FREIGHT_WHY_NOW;
+    if (isTariffIssue(issue)) return STEEL_TARIFF_WHY_NOW;
+  }
   return String(issue.why_now || "");
 }
 
 export function getRiskBusinessImpact(issue: IssueLike): string {
-  if (isTariffIssue(issue)) return STEEL_TARIFF_BUSINESS_IMPACT;
-  return String((issue as Record<string, unknown>).risk_interaction as string || (issue as Record<string, unknown>).business_impact as string || "");
+  if (!isMetricBacked(issue) && isTariffIssue(issue)) return STEEL_TARIFF_BUSINESS_IMPACT;
+  return String((issue as Record<string, unknown>).business_impact as string || (issue as Record<string, unknown>).risk_interaction as string || "");
 }
 
 export function getDecisionTrigger(issue: IssueLike): string {
-  // Freight: always use canonical
-  if (isFreightIssue(issue)) return FREIGHT_DECISION_TRIGGER;
+  // Metric-backed issues use their own stored, owner-specific action.
+  if (isMetricBacked(issue)) {
+    const stored = String(issue.decision_required || issue.action_required || "").trim();
+    if (stored.length > 10) return stored.slice(0, 240);
+  }
+  // Freight: canonical only for scenario-backed
+  if (!isMetricBacked(issue) && isFreightIssue(issue)) return FREIGHT_DECISION_TRIGGER;
 
   // Tariff operating change
-  if (isTariffIssue(issue) && String(issue.display_section || "").includes("operating")) {
+  if (!isMetricBacked(issue) && isTariffIssue(issue) && String(issue.display_section || "").includes("operating")) {
     return TARIFF_DECISION_TRIGGER;
   }
 
@@ -223,7 +240,7 @@ export function getDecisionTrigger(issue: IssueLike): string {
     return "Escalate if supplier landed cost impact exceeds $5M or country-of-origin data is unavailable for top-spend categories.";
   }
 
-  return "Escalate when exposure is validated or a company-specific trigger event occurs.";
+  return "Escalate if a company-specific adverse trigger event is confirmed or exposure is validated for action.";
 }
 
 export function getOpportunityTitle(issue: IssueLike): string {
@@ -249,7 +266,7 @@ export function getOpportunityWhyNow(issue: IssueLike): string {
 }
 
 export function getOperatingChangeSummary(issue: IssueLike): string {
-  if (isTariffIssue(issue)) return TARIFF_OP_CHANGE_SUMMARY;
+  if (!isMetricBacked(issue) && isTariffIssue(issue)) return TARIFF_OP_CHANGE_SUMMARY;
   const s1 = String(issue.exposure_interpretation || issue.executive_summary || issue.what_happened || "");
   const s2 = String(issue.business_impact || issue.risk_interaction || "");
   return [s1, s2].filter(Boolean).join(" ").slice(0, 400);
@@ -261,10 +278,25 @@ export function getOperatingChangeDecisionTrigger(issue: IssueLike): string {
 }
 
 export function getWatchlistSummary(issue: IssueLike): string {
-  const t = String(issue.risk_title || issue.title || "").toLowerCase();
-  if (t.includes("steel") || t.includes("canada") || t.includes("aluminum")) {
-    return WATCHLIST_CANADA_STEEL_SUMMARY;
+  const rawTitle = String(issue.risk_title || issue.title || "");
+  const t = rawTitle.toLowerCase();
+  const pctMatch = rawTitle.match(/([+-]?\d+(?:\.\d+)?)\s*%/);
+  const pctNum = pctMatch ? parseFloat(pctMatch[1]) : null;
+
+  // Trade-flow (import flow) watch — annual UN Comtrade context, NOT a current supplier disruption.
+  if (t.includes("import flow") || t.includes("trade flow")) {
+    const lead = rawTitle.split(/ import flow/i)[0].trim();
+    const commodity = /steel|iron/i.test(lead) ? "iron/steel" : (lead.toLowerCase() || "commodity");
+    const phrase = pctNum != null ? `${pctNum < 0 ? "down" : "up"} ${Math.abs(pctNum)}%` : "shifting";
+    return `UN Comtrade shows US ${commodity} import flow ${phrase} in 2025. This is annual trade-flow context, not a current supplier disruption. Upgrade only if supplier country-of-origin exposure maps to affected HS categories.`;
   }
+
+  // Demand watch — possible upside, but needs segment exposure_share + demand beta before sizing.
+  if (t.includes("demand") || t.includes("durable goods") || t.includes("orders")) {
+    const phrase = pctNum != null ? `${pctNum > 0 ? "+" : ""}${pctNum}%` : "moved";
+    return `Durable Goods orders ${phrase} is a possible demand-upside signal held on the watchlist. Modeling a dollar impact requires a segment exposure_share and a demand beta (<1) — until those are calibrated it stays directional, not sized.`;
+  }
+
   // Sanitize the raw fields
   const candidates = [
     issue.executive_summary,
@@ -287,11 +319,24 @@ export function getWatchlistWhyNotModeled(_issue: IssueLike): string {
   return "No current source provides a clean incremental rate, cost, supply, or demand movement tied directly to Fastenal-relevant inputs.";
 }
 
-export function getWatchlistUpgradeTrigger(_issue: IssueLike): string {
+export function getWatchlistUpgradeTrigger(issue: IssueLike): string {
+  const t = String(issue.risk_title || issue.title || "").toLowerCase();
+  // Specific, issue-aware upgrade triggers — never a generic catch-all.
+  if (t.includes("import flow") || t.includes("trade flow")) {
+    return "Upgrade when supplier country-of-origin exposure maps to the affected HS categories and a specific lane or SKU disruption is confirmed.";
+  }
+  if (t.includes("demand") || t.includes("durable goods") || t.includes("orders")) {
+    return "Upgrade when a segment exposure_share and demand beta (<1) are calibrated, or a CRM/order signal ties the move to specific accounts.";
+  }
   return WATCHLIST_UPGRADE_TRIGGER;
 }
 
 export function getForecastSummary(issue: IssueLike): string {
+  if (isMetricBacked(issue)) {
+    const f = (issue.methodology as Record<string, unknown> | null | undefined)?.formula;
+    if (typeof f === "string" && f) return f;
+    return String(issue.business_impact || issue.exposure_interpretation || issue.risk_title || issue.title || "");
+  }
   if (isFreightIssue(issue)) {
     return "Source-backed logistics price pressure estimate; lane-specific freight-rate validation pending.";
   }
@@ -316,8 +361,12 @@ export function getTopMetricLabels(hasOpportunities: boolean, allCandidates: boo
 }
 
 export function getEstimateLabel(issue: IssueLike): string {
+  // Metric-backed issues carry a real, source-traced point estimate — never "scenario".
+  if (isMetricBacked(issue)) {
+    return String(issue.numeric_basis_type) === "article_numeric_claim"
+      ? "Article-claimed estimate" : "Official metric estimate";
+  }
   const cat = String(issue.issue_category || "").toLowerCase();
-  if (cat.includes("freight") || cat.includes("logistics")) return "Scenario range";
   if (cat.includes("tariff") || cat.includes("trade")) return "Residual exposure estimate";
   if (cat.includes("commodity") || cat.includes("steel") || cat.includes("copper")) return "Commodity exposure estimate";
   return "Scenario range";

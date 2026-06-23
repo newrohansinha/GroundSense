@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { canViewAdminControls } from "../services/companyService";
 
 type DecisionEntry = {
   firstDetectedAt: string | null;
@@ -18,6 +19,10 @@ type DecisionMemoryPanelProps = {
   issueType: "risk" | "opportunity" | "operating_change" | "watchlist";
   existing?: DecisionEntry | null;
   ownerFromAction?: string | null;
+  // Issue lifecycle dates — used as a fallback for first-detected / last-updated so
+  // published issues never show "Not tracked yet" before a decision is recorded.
+  issueCreatedAt?: string | null;
+  issueUpdatedAt?: string | null;
   onSave?: (entry: Omit<DecisionEntry, "firstDetectedAt" | "lastReviewedAt">) => void;
 };
 
@@ -57,6 +62,8 @@ export default function DecisionMemoryPanel({
   issueType: _issueType,
   existing,
   ownerFromAction,
+  issueCreatedAt,
+  issueUpdatedAt,
   onSave,
 }: DecisionMemoryPanelProps) {
   const [saved, setSaved] = useState<DecisionEntry | null>(existing ?? null);
@@ -139,8 +146,10 @@ export default function DecisionMemoryPanel({
 
   const displayStatus = saved?.status || "Open";
   const displayOwner = saved?.owner || null;
-  const displayFirstDetected = saved?.firstDetectedAt || null;
-  const displayLastReviewed = saved?.lastReviewedAt || null;
+  // Fall back to the issue's own lifecycle dates so published issues show a real
+  // "first detected" / "last updated" instead of "Not tracked yet".
+  const displayFirstDetected = saved?.firstDetectedAt || issueCreatedAt || null;
+  const displayLastReviewed = saved?.lastReviewedAt || issueUpdatedAt || issueCreatedAt || null;
   const displayNextReview = saved?.nextReviewAt || null;
 
   return (
@@ -343,7 +352,7 @@ export default function DecisionMemoryPanel({
 
       <div className="gs-dmp-header">
         <div>
-          <h3 className="gs-dmp-title">Decision Memory</h3>
+          <h3 className="gs-dmp-title">{canViewAdminControls() ? "Decision Memory" : "Decision tracking"}</h3>
           <p className="gs-dmp-issue-name">{issueTitle}</p>
         </div>
         {!showForm && (
@@ -385,7 +394,7 @@ export default function DecisionMemoryPanel({
           {displayFirstDetected ? (
             <span className="gs-dmp-field-value">{formatDate(displayFirstDetected)}</span>
           ) : (
-            <span className="gs-dmp-field-null">Not tracked yet</span>
+            <span className="gs-dmp-field-null">—</span>
           )}
         </div>
         <div className="gs-dmp-field">
@@ -393,7 +402,7 @@ export default function DecisionMemoryPanel({
           {displayLastReviewed ? (
             <span className="gs-dmp-field-value">{formatDate(displayLastReviewed)}</span>
           ) : (
-            <span className="gs-dmp-field-null">Not tracked yet</span>
+            <span className="gs-dmp-field-null">—</span>
           )}
         </div>
         <div className="gs-dmp-field">

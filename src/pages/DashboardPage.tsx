@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { isDemoMode } from "../services/companyService";
+import { isDemoMode, canViewAdminControls, syncOperatorModeFromUrl, leaveOperatorMode } from "../services/companyService";
 import { matchEventsToConnections } from "../services/eventConnectionMatcher";
 import { fetchEventsForCompany } from "../services/eventFetcher";
 import { scoreEventsForCompany } from "../services/eventScorer";
@@ -119,12 +119,15 @@ const RUN_COUNTER_FIELDS: [keyof RunProgressSnapshot, string][] = [
   ["articles_fetched", "articles fetched"],
   ["articles_inserted", "new articles"],
   ["article_duplicates", "duplicates"],
-  ["articles_rejected", "rejected"],
-  ["verified_shocks_created", "verified shocks"],
+  ["articles_rejected", "off-topic"],
+  ["articles_failed_insert", "insert-failed"],
+  ["verified_shocks_created", "numeric shocks"],
   ["candidates_generated", "candidates"],
   ["candidates_published", "published"],
   ["candidates_review", "review"],
   ["candidates_quarantined", "quarantined"],
+  ["watch_items_created", "watch"],
+  ["candidates_blocked", "blocked"],
   ["actions_created", "actions"],
   ["briefs_created", "brief"],
 ];
@@ -484,10 +487,26 @@ type NumberExplanation = {
   source?: string;
   note?: string;
   inputs?: ExplanationInput[];
+  inputsProvenance?: string;
   caveat?: string;
 };
 
+// Where the company inputs in a formula came from — never present demo/inferred
+// figures as real company data.
+function inputProvenanceLabel(risk: unknown): string {
+  // Concise provenance for the company inputs in a formula (freight/metal spend,
+  // spot %, unpassed %, fuel-exposed freight). Demo figures are never presented as
+  // real company data.
+  if (isDemoMode()) return "demo calibration (illustrative, not real company data)";
+  const fi = (risk as any)?.formula_inputs;
+  const hasCompanyInputs = fi && typeof fi === "object" && Object.keys(fi).length > 0;
+  return hasCompanyInputs ? "calibration table" : "inferred assumption";
+}
+
 export default function DashboardPage({ view = "dashboard" }: { view?: "dashboard" | "risks" }) {
+  // Sync operator mode from ?operator=1/0 once, before first paint, so admin
+  // controls reflect the URL immediately (lazy initializer runs exactly once).
+  useState(() => { syncOperatorModeFromUrl(); return null; });
   const [company, setCompany] = useState<Company | null>(null);
   const [entities, setEntities] = useState<Entity[]>([]);
   const [events, setEvents] = useState<RawEvent[]>([]);
@@ -1113,20 +1132,16 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
     [risks, opportunities, _verifiedShockRiskIds] // eslint-disable-line react-hooks/exhaustive-deps
   );
 
-  // Published (executive-facing): only items that pass the gate
-  // candidate_review and quarantine are both excluded from executive sections
-  const riskItems = _allRiskItems.filter((r) => {
-    const d = _gateResults.get(r.id)?.decision;
-    return !d || d === "publish";
-  });
-  const operatingChanges = _allOperatingChanges.filter((r) => {
-    const d = _gateResults.get(r.id)?.decision;
-    return !d || d === "publish";
-  });
-  const watchlistItems = _allWatchlistItems.filter((r) => {
-    const d = _gateResults.get(r.id)?.decision;
-    return !d || d === "publish";
-  });
+  // Published (executive-facing): the SERVER gate_status is the single source of
+  // truth (numeric-shock-ledger generator). The client gate is kept only as an
+  // additive signal; it must never override the server decision, or dashboard /
+  // risk-page / brief counts diverge. Published = gate_status 'published'.
+  const riskItems = _allRiskItems.filter((r) => (r as any).gate_status === "published");
+  const operatingChanges = _allOperatingChanges.filter((r) => (r as any).gate_status === "published");
+  // Watchlist = active (non-published) watch items, excluding superseded/archived rows.
+  const watchlistItems = _allWatchlistItems.filter(
+    (r) => (r as any).gate_status !== "published" && !(r as any).archived_at
+  );
   const publishedOpportunities = opportunities.filter((o) => {
     const d = _gateResults.get(o.id)?.decision;
     return !d || d === "publish";
@@ -1137,6 +1152,12 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   const candidateQueueItems: CandidateQueueItem[] = [
     ...[..._allRiskItems, ..._allOperatingChanges, ..._allWatchlistItems]
       .filter((r) => {
+        // Canonical: the server gate_status decides. A published issue is never in
+        // the review queue, and watch items live in the Watchlist — not "pending
+        // review". Only items the server did NOT route to published/watch may be
+        // re-evaluated by the (advisory) client gate.
+        const gs = (r as any).gate_status;
+        if (gs === "published" || gs === "watch") return false;
         const d = _gateResults.get(r.id)?.decision;
         return d === "quarantine" || d === "candidate_review";
       })
@@ -1273,57 +1294,33 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   // the exposure path shows actual inputs ("$37.6M steel-linked spend × 20%
   // unpassed …") instead of placeholder text. Returns nulls when there's no
   // calibrated basis (the path then honestly says "calibration pending").
-  const calForGraph = (effectiveCalibration ?? {}) as Record<string, unknown>;
-  const posNum = (v: unknown) => { const x = Number(v); return Number.isFinite(x) && x > 0 ? x : null; };
-  const fmtSpend = (v: number) => (v >= 1e6 ? `$${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `$${Math.round(v / 1e3)}K` : `$${Math.round(v)}`);
-  const driverBasis = (driver: string): { label: string; spend: number | null; movement: string } => {
-    if (driver === "freight") return { label: "freight", spend: posNum(calForGraph.freight_spend), movement: "logistics rate movement" };
-    if (/copper/.test(driver)) return { label: "copper-linked", spend: posNum(calForGraph.copper_spend), movement: "imported-component cost movement" };
-    if (/alumin/.test(driver)) return { label: "aluminum-linked", spend: posNum(calForGraph.aluminum_spend), movement: "imported-component cost movement" };
-    if (/steel|tariff|commodity|supply/.test(driver)) return { label: "steel-linked", spend: posNum(calForGraph.steel_spend), movement: "imported-component cost movement" };
-    return { label: "", spend: null, movement: "external cost movement" };
-  };
-
   const publishedIssuesForGraph = [...riskItems, ...operatingChanges].map((r) => {
     const est = execByIssueId.get(r.id) ?? null;
-    const lo = Number(r.impact_low || 0);
-    const hi = Number(r.impact_high || 0);
-    const impactDisplay =
-      est && est.value !== null
-        ? est.display
-        : lo || hi
-          ? `${formatExecutiveEstimate(lo)}–${formatExecutiveEstimate(hi)}`
-          : "Needs validation";
+    // Canonical: dollar + formula + source all come from the stored numeric basis
+    // (via the rewritten executive estimate), never recomputed from calibration.
+    const impactDisplay = est && est.value !== null ? est.display : formatExecutiveEstimate(Number(r.impact_high || 0) || null);
     const action = publishedActions.find((a) => a.risk_id === r.id) ?? null;
-    const driver = isFreightIssue(r)
-      ? "freight"
-      : isTariffIssue(r)
-        ? "tariff"
-        : (String(r.issue_category || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "") || "supply");
-    const evidenceBacked = getIssueModelStatus(r.methodology).status === "evidence_backed";
-    // Build a real exposure basis + formula from calibration for this driver.
-    const basis = driverBasis(driver);
-    const passThrough = posNum(calForGraph.pass_through_coverage_pct);
-    const unpassed = passThrough != null ? Math.round(100 - passThrough) : null;
-    const exposureText = basis.spend != null
-      ? `${fmtSpend(basis.spend)} ${basis.label} spend exposed to ${basis.movement}${unpassed != null ? `; ${unpassed}% unpassed after ${Math.round(passThrough!)}% pass-through coverage` : ""}.`
-      : null;
-    const calculation = basis.spend != null
-      ? `${evidenceBacked ? "" : "Scenario estimate — "}${fmtSpend(basis.spend)} ${basis.label} spend${unpassed != null ? ` × ${unpassed}% unpassed` : ""} × cost sensitivity → ${impactDisplay}. Validate sensitivity against supplier/lane price updates.`
-      : null;
+    const meth = (r.methodology ?? {}) as Record<string, unknown>;
+    const driver = String(meth.driver_template || "")
+      || (String(r.risk_type || "").includes("freight") ? "freight"
+        : String(r.risk_type || "").includes("fuel") ? "fuel"
+        : String(r.risk_type || "").includes("commodity") ? "metals" : "supply");
+    const nbType = (r as any).numeric_basis_type ?? "no_numeric_basis";
+    const evidenceBacked = ["official_structured_metric", "manual_structured_metric", "company_structured_metric"].includes(nbType);
+    const articleBacked = nbType === "article_numeric_claim";
+    const calculation = est?.calculation ?? (typeof meth.formula === "string" ? (meth.formula as string) : null);
+    const exposureText = String(r.exposure_interpretation || "") || null;
+    const isChange = r.display_section === "operating_changes";
     return {
       id: r.id,
       title: r.risk_title,
       driver,
-      issueType: isTariffIssue(r) ? "Operating Change" : "Operating Risk",
+      issueType: isChange ? "Operating Change" : "Operating Risk",
       impactDisplay,
       calculation,
       exposureText,
-      evidenceStatus:
-        getIssueModelStatus(r.methodology).status === "evidence_backed"
-          ? "evidence_backed"
-          : "scenario_modeled",
-      sourceLabel: r.issue_category ? String(r.issue_category).replace(/_/g, " ") : null,
+      evidenceStatus: evidenceBacked ? "evidence_backed" : articleBacked ? "article_claimed" : "scenario_modeled",
+      sourceLabel: (r as any).numeric_basis_source_label ?? null,
       action: action
         ? { title: action.title, owner: action.owner || "Unassigned", due: fmtActionDue(action.deadline), nextStep: null }
         : null,
@@ -1337,17 +1334,16 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
     calibration: effectiveCalibration,
     blockedCandidateTitles: candidateQueueItems.filter((i) => i.type === "opportunity").map((i) => i.title),
     valueAtStakeDisplay: formatExecutiveEstimate(execTotalRisk),
+    // Direction-split totals — downside risk and favorable relief are never merged into one figure.
+    downsideAtStakeDisplay: formatExecutiveEstimate(execRiskSectionTotal),
+    favorableReliefDisplay: execChangeSectionTotal > 0 ? formatExecutiveEstimate(execChangeSectionTotal) : undefined,
     freightAction: actionByIssueKey.get("freight_logistics_pressure"),
     tariffAction: actionByIssueKey.get("tariff_trade_policy_relief"),
     publishedIssues: publishedIssuesForGraph,
   });
 
   // Canonical issue taxonomy: tariff items are Operating Changes, not downside risks.
-  const canonicalRiskCount = riskItems.filter((r) => !isTariffIssue(r)).length;
-  const canonicalChangeCount = operatingChanges.length + riskItems.filter((r) => isTariffIssue(r)).length;
   const pluralize = (n: number, s: string) => `${n} ${s}${n === 1 ? "" : "s"}`;
-  const oppLabel = publishedOpportunities.length === 1 ? "1 opportunity" : `${publishedOpportunities.length} opportunities`;
-  const canonicalIssueSubtitle = `${pluralize(canonicalRiskCount, "risk")} · ${pluralize(canonicalChangeCount, "operating change")} · ${watchlistItems.length} watch · ${oppLabel}`;
 
 const totalRiskHigh = riskItems.reduce(
   (sum, risk) => sum + Number(risk.impact_high || 0),
@@ -1358,57 +1354,38 @@ const totalRiskLow = riskItems.reduce(
   (sum, risk) => sum + Number(risk.impact_low || 0),
   0
 );
+// Use numeric_basis_type as the canonical source of truth for issue model status (FIX 3/6).
+// "Evidence-backed" = official government/BLS/manual structured metric.
+// "Article-claimed" = extracted from article body text (lower trust, validation required).
+// "Scenario-modeled" = no verified external number — calibration scenario only.
 const evidenceBackedRiskItems = riskItems.filter(
-  (risk) => getIssueModelStatus(risk.methodology).status === "evidence_backed"
+  (risk) => ["official_structured_metric", "manual_structured_metric"].includes(
+    (risk as any).numeric_basis_type ?? "no_numeric_basis"
+  )
+);
+
+const articleClaimRiskItems = riskItems.filter(
+  (risk) => (risk as any).numeric_basis_type === "article_numeric_claim"
 );
 
 const scenarioRiskItems = riskItems.filter(
-  (risk) => getIssueModelStatus(risk.methodology).status === "scenario_fallback"
+  (risk) => ((risk as any).numeric_basis_type ?? "no_numeric_basis") === "no_numeric_basis"
+    && getIssueModelStatus(risk.methodology).status !== "needs_calibration"
 );
 
 const needsCalibrationRiskItems = riskItems.filter(
   (risk) => getIssueModelStatus(risk.methodology).status === "needs_calibration"
 );
 
-const evidenceBackedRiskLow = evidenceBackedRiskItems.reduce(
-  (sum, risk) => sum + Number(risk.impact_low || 0),
-  0
-);
-
-const evidenceBackedRiskHigh = evidenceBackedRiskItems.reduce(
-  (sum, risk) => sum + Number(risk.impact_high || 0),
-  0
-);
-
-const scenarioRiskLow = scenarioRiskItems.reduce(
-  (sum, risk) => sum + Number(risk.impact_low || 0),
-  0
-);
-
-const scenarioRiskHigh = scenarioRiskItems.reduce(
-  (sum, risk) => sum + Number(risk.impact_high || 0),
-  0
-);
-
-const residualOperatingLow = operatingChanges.reduce(
-  (sum, risk) => sum + Number(risk.impact_low || 0),
-  0
-);
-
-const residualOperatingHigh = operatingChanges.reduce(
-  (sum, risk) => sum + Number(risk.impact_high || 0),
-  0
-);
-
 function riskExposureSubtitle() {
   if (riskItems.length === 0) return "No modeled downside";
 
   if (evidenceBackedRiskItems.length > 0 && scenarioRiskItems.length > 0) {
-    return "Evidence-backed + scenario downside";
+    return "Official metric-backed + scenario downside";
   }
 
   if (evidenceBackedRiskItems.length > 0) {
-    return "Evidence-backed downside";
+    return "Official metric-backed downside";
   }
 
   if (scenarioRiskItems.length > 0) {
@@ -1448,6 +1425,24 @@ function riskExposureSubtitle() {
         )
       : 0;
 
+  // Official numeric-ledger coverage for the Evidence Sources KPI: each published
+  // metric-backed issue is one official metric observation, sourced from a distinct
+  // official source (BLS, EIA, …). Derived from the numeric basis on each published
+  // issue — NOT from evidence_items.source — so it always matches the published set.
+  const officialMetricIssues = [...riskItems, ...operatingChanges].filter((r) =>
+    ["official_structured_metric", "manual_structured_metric", "company_structured_metric"].includes(
+      (r as any).numeric_basis_type ?? "no_numeric_basis"
+    )
+  );
+  const officialMetricObservations = officialMetricIssues.length;
+  const officialSourceCount = new Set(
+    officialMetricIssues
+      .map((r) => String((r as any).numeric_basis_source_label || ""))
+      // Normalize "Official metric · BLS …" / raw labels down to the issuing agency.
+      .map((s) => (/\bBLS\b/i.test(s) ? "BLS" : /\bEIA\b/i.test(s) ? "EIA" : /\bFRED\b/i.test(s) ? "FRED" : /\bUSITC\b/i.test(s) ? "USITC" : /\bcensus\b/i.test(s) ? "Census" : s.trim()))
+      .filter(Boolean)
+  ).size;
+
   const actionRoiItems = useMemo((): ActionRoiItem[] => {
     const items: ActionRoiItem[] = publishedActions.map((action) => {
       const linkedRisk = action.risk_id
@@ -1468,12 +1463,13 @@ function riskExposureSubtitle() {
 
       // Executive point-estimate benefit/protected value from the linked issue (no ranges).
       const execEst = linkedRisk ? execByIssueId.get(linkedRisk.id) ?? null : null;
+      const isFavorableIssue = (linkedRisk as any)?.display_section === "operating_changes" || (linkedRisk as any)?.issue_direction === "favorable";
       const execBenefit = execEst
         ? execEst.value === null
           ? "Needs validation"
-          : execEst.kind === "freight"
-          ? `${execEst.display} current-period cost pressure under review`
-          : `${execEst.display} value at stake`
+          : isFavorableIssue
+          ? `${execEst.display} relief opportunity under review`
+          : `${execEst.display} exposure under review`
         : null;
       const execProtected = execEst && execEst.value !== null
         ? execEst.kind === "tariff"
@@ -1526,7 +1522,7 @@ function riskExposureSubtitle() {
         expectedBenefitHigh: oc.impact_high,
         effortLevel: "Medium",
         protectedValue: oc.impact_low,
-        execBenefit: execEst && execEst.value !== null ? `${execEst.display} tariff relief validation opportunity` : null,
+        execBenefit: execEst && execEst.value !== null ? `${execEst.display} relief opportunity under review` : null,
         execProtected: null,
         successCondition: "Supplier landed-cost updates confirmed; affected SKUs and open-PO exposure validated.",
         nextStep:
@@ -1535,7 +1531,13 @@ function riskExposureSubtitle() {
         outcomeStatus: "Open — awaiting validation",
       });
     }
-    return items;
+    // Sort by business relevance: largest dollar impact first (freight → diesel →
+    // steel → copper → aluminum), favorable value-capture included.
+    return [...items].sort(
+      (a, b) =>
+        Math.abs(Number(b.expectedBenefitHigh ?? b.protectedValue ?? 0)) -
+        Math.abs(Number(a.expectedBenefitHigh ?? a.protectedValue ?? 0))
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publishedActions, risks, opportunities, execByIssueId, operatingChanges]);
 
@@ -1556,13 +1558,9 @@ function riskExposureSubtitle() {
   const forecastRows = useMemo(() => {
     return [
       ...riskItems.map((r) => {
-        const safeStatus = getForecastSummary({
-          risk_title: r.risk_title,
-          executive_summary: r.executive_summary,
-          issue_category: r.issue_category,
-          methodology: r.methodology as Record<string, unknown> | null,
-        });
+        const safeStatus = getForecastSummary(r as any);
         const modelStatus = getIssueModelStatus(r.methodology);
+        const metricBacked = ["official_structured_metric", "manual_structured_metric", "company_structured_metric", "article_numeric_claim"].includes((r as any).numeric_basis_type ?? "no_numeric_basis");
         return {
           issueId: r.id,
           // Canonical taxonomy: tariff items render as Operating Change, not Risk.
@@ -1575,20 +1573,15 @@ function riskExposureSubtitle() {
           outcomeStatus: "open" as const,
           actualImpact: null as number | null,
           execEstimate: execByIssueId.get(r.id)?.display ?? "Needs validation",
-          outcomeNotes: execMode
-            ? (isFreightIssue(r) ? "Lane-specific freight-rate validation pending" : "Validation pending")
+          outcomeNotes: metricBacked
+            ? `${(r as any).numeric_basis_source_label ?? "Official metric"} — tracking realized vs modeled`
             : modelStatus.status === "scenario_fallback"
             ? "Scenario-modeled — awaiting validation"
-            : null,
+            : "Validation pending",
         };
       }),
       ...operatingChanges.map((r) => {
-        const safeStatus = getForecastSummary({
-          risk_title: r.risk_title,
-          executive_summary: r.executive_summary,
-          issue_category: r.issue_category,
-          methodology: r.methodology as Record<string, unknown> | null,
-        });
+        const safeStatus = getForecastSummary(r as any);
         return {
           issueId: r.id,
           issueType: "operating_change" as const,
@@ -1667,11 +1660,11 @@ function riskExposureSubtitle() {
             <p className="dashboard-subtitle">
               {view === "risks"
                 ? "Published issues, operating changes, candidate review, and evidence quality."
-                : `Verified external shocks mapped to ${company?.name ?? "your company's"} exposure, P&L impact, and actions.`}
+                : `Official numeric signals mapped to ${company?.name ?? "your company's"} exposure, P&L impact, and actions.`}
             </p>
             {view === "risks" && (
               <p className="dashboard-subtitle" style={{ marginTop: 6, fontWeight: 600, color: "var(--text-secondary)" }}>
-                {pluralize(riskItems.length + operatingChanges.length, "published item")} · {formatExecutiveEstimate(execTotalRisk)} total value at stake · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
+                {pluralize(riskItems.length + operatingChanges.length, "published item")} · Downside {formatExecutiveEstimate(execRiskSectionTotal)}{execChangeSectionTotal > 0 ? ` · Favorable relief ${formatExecutiveEstimate(execChangeSectionTotal)}` : ""} · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
               </p>
             )}
           </div>
@@ -1713,11 +1706,20 @@ function riskExposureSubtitle() {
           </section>
         )}
 
+        {/* Operator mode badge + one-click exit (so operator view can never get stuck). */}
+        {canViewAdminControls() && (
+          <section className="gs-operator-banner">
+            <span className="gs-operator-badge">● Operator Mode</span>
+            <span className="gs-operator-note">Admin / pipeline / source-audit controls are visible. Buyers never see these.</span>
+            <button className="gs-operator-leave" onClick={leaveOperatorMode}>Leave operator mode →</button>
+          </section>
+        )}
+
         {/* ── Primary toolbar (dashboard only; Risks is a read/review surface) ── */}
         {view === "dashboard" && (
         <>
         <section className="toolbar toolbar-primary">
-          {!isDemoMode() && (
+          {canViewAdminControls() && (
             <>
               <button
                 className="primary-button toolbar-run-btn"
@@ -1739,7 +1741,7 @@ function riskExposureSubtitle() {
             </>
           )}
 
-          {!isDemoMode() && (!execMode || showAdvancedPipeline) && (
+          {canViewAdminControls() && (!execMode || showAdvancedPipeline) && (
             <button
               className="toolbar-stop-btn"
               onClick={handleStopResetPipeline}
@@ -1751,15 +1753,19 @@ function riskExposureSubtitle() {
           )}
 
           <div className="toolbar-secondary-group">
-            <Link to="/calibration">
-              <button className="secondary-button" disabled={busy !== null}>Calibrate Model</button>
-            </Link>
+            {canViewAdminControls() && (
+              <Link to="/calibration">
+                <button className="secondary-button" disabled={busy !== null}>Calibrate Model</button>
+              </Link>
+            )}
             <Link to="/sources">
               <button className="secondary-button" disabled={busy !== null}>Source Hub</button>
             </Link>
-            <button className="secondary-button" disabled title="Generate an Executive Brief first to enable export">Export Memo</button>
+            {canViewAdminControls() && (
+              <button className="secondary-button" disabled title="Generate an Executive Brief first to enable export">Export Memo</button>
+            )}
             {/* Internal/admin controls — hidden from the default executive view. */}
-            {!isDemoMode() && (!execMode || showAdvancedPipeline) && (
+            {canViewAdminControls() && (!execMode || showAdvancedPipeline) && (
               <>
                 <button
                   className="secondary-button"
@@ -1779,12 +1785,14 @@ function riskExposureSubtitle() {
             )}
           </div>
 
-          <button
-            className="text-button toolbar-advanced-toggle"
-            onClick={() => setShowAdvancedPipeline((v) => !v)}
-          >
-            {showAdvancedPipeline ? "▲ Hide advanced / admin controls" : "▼ Advanced / admin controls"}
-          </button>
+          {canViewAdminControls() && (
+            <button
+              className="text-button toolbar-advanced-toggle"
+              onClick={() => setShowAdvancedPipeline((v) => !v)}
+            >
+              {showAdvancedPipeline ? "▲ Hide advanced / admin controls" : "▼ Advanced / admin controls"}
+            </button>
+          )}
         </section>
 
         {/* ── Structured start-failure + diagnostics ── */}
@@ -2047,14 +2055,9 @@ function riskExposureSubtitle() {
         {view === "dashboard" && (
         <section className="metrics-grid" id="overview">
           <Metric
-  title="Executive Issues"
-  value={String(
-    riskItems.length +
-      operatingChanges.length +
-      watchlistItems.length +
-      publishedOpportunities.length
-  )}
-  subtitle={execMode ? canonicalIssueSubtitle : `${riskItems.length} risks · ${operatingChanges.length} changes · ${watchlistItems.length} watch · ${publishedOpportunities.length} opportunities`}
+  title="Active decisions"
+  value={String(riskItems.length + operatingChanges.length)}
+  subtitle={`${watchlistItems.length} on watchlist${publishedOpportunities.length > 0 ? ` · ${publishedOpportunities.length} opportunit${publishedOpportunities.length === 1 ? "y" : "ies"}` : ""}`}
             explanation={explainDashboardMetric("executive_issues", {
   riskCount: riskItems.length,
   operatingChangeCount: operatingChanges.length,
@@ -2064,32 +2067,31 @@ function riskExposureSubtitle() {
           />
 
           <Metric
-  title={execMode ? "Quantified Value at Stake" : "Risk Exposure"}
-  value={execMode ? formatExecutiveEstimate(execTotalRisk) : `${formatMoney(totalRiskLow)}–${formatMoney(totalRiskHigh)}`}
+  title={execMode ? "Downside Exposure" : "Risk Exposure"}
+  value={execMode ? formatExecutiveEstimate(execRiskSectionTotal) : `${formatMoney(totalRiskLow)}–${formatMoney(totalRiskHigh)}`}
   subtitle={
     execMode
       ? `${evidenceBackedRiskItems.length > 0
-          ? "Verified external metric · calibrated estimate"
-          : "Company-calibrated scenario estimate"}${execFreight ? ` · Freight ${execFreight.display}` : ""}${execTariff ? ` · Tariff ${execTariff.display}` : ""}`
+          ? "Official metric-backed downside"
+          : articleClaimRiskItems.length > 0
+            ? "Article-claimed · validation required"
+            : "Company-calibrated estimate"}${execChangeSectionTotal > 0 ? ` · Favorable relief ${formatExecutiveEstimate(execChangeSectionTotal)}` : ""}`
       : riskExposureSubtitle()
   }
   explanation={explainDashboardMetric("risk_exposure", {
-    low: totalRiskLow,
-    high: totalRiskHigh,
-    count: riskItems.length,
-    evidenceBackedLow: evidenceBackedRiskLow,
-    evidenceBackedHigh: evidenceBackedRiskHigh,
-    evidenceBackedCount: evidenceBackedRiskItems.length,
-    scenarioLow: scenarioRiskLow,
-    scenarioHigh: scenarioRiskHigh,
-    scenarioCount: scenarioRiskItems.length,
-    residualLow: residualOperatingLow,
-    residualHigh: residualOperatingHigh,
-    residualCount: operatingChanges.length,
-    needsCalibrationCount: needsCalibrationRiskItems.length,
+    downside: execRiskSectionTotal,
+    downsideCount: riskItems.length,
+    favorable: execChangeSectionTotal,
+    favorableCount: operatingChanges.length,
+    watchCount: watchlistItems.length,
+    metricBackedCount: evidenceBackedRiskItems.length,
+    articleBackedCount: articleClaimRiskItems.length,
   })}
 />
 
+          {/* Candidate Upside hidden entirely when there is nothing to show
+              (no approved upside and no pending/quarantined candidates). */}
+          {(publishedOpportunities.length > 0 || candidateSummary.pendingReview > 0 || candidateSummary.quarantined > 0) && (
           <Metric
             title="Candidate Upside"
             value={
@@ -2112,13 +2114,16 @@ function riskExposureSubtitle() {
               count: publishedOpportunities.length,
             })}
           />
+          )}
 
           
 
           <Metric
   title="Evidence Sources"
-  value={String(uniqueEvidenceSources)}
-  subtitle={`${allEvidenceItems.length} items · quality ${avgEvidenceQuality >= 70 ? "High" : avgEvidenceQuality >= 50 ? "Medium" : "Low"} (avg ${avgEvidenceQuality}/100)`}
+  value={officialMetricObservations > 0 ? `${pluralize(officialSourceCount, "official source")}` : String(uniqueEvidenceSources)}
+  subtitle={officialMetricObservations > 0
+    ? `${pluralize(officialMetricObservations, "metric observation")} · quality High (official government metrics)`
+    : `${allEvidenceItems.length} items · quality ${avgEvidenceQuality >= 70 ? "High" : avgEvidenceQuality >= 50 ? "Medium" : "Low"} (avg ${avgEvidenceQuality}/100)`}
   explanation={explainDashboardMetric("supporting_signals", {
     relevant: signalStats.relevantEvents,
     events: signalStats.rawEvents,
@@ -2175,7 +2180,6 @@ function riskExposureSubtitle() {
           candidateQueueCount={candidateQueueItems.length}
           quarantineCount={candidateQueueItems.filter(i => i.gateResult.decision === "quarantine").length}
           reviewCount={candidateQueueItems.filter(i => i.gateResult.decision === "candidate_review").length}
-          totalGeneratedCount={opportunities.length + risks.length}
           execMode={execMode}
           execTotalRisk={execTotalRisk}
           actions={publishedActions}
@@ -2214,9 +2218,11 @@ function riskExposureSubtitle() {
         {/* 4b. Driver Priority Map — compact, below the graph */}
         {view === "dashboard" && driverPriorityReport.drivers.length > 0 && (
           <DriverPriorityMap
+            /* Watch count reflects the global watchlist, not just published-issue drivers,
+               so the map never shows "0 Watch" while the watchlist has items. */
             drivers={driverPriorityReport.drivers}
             topDriver={driverPriorityReport.topDriver}
-            watchCount={driverPriorityReport.watchCount}
+            watchCount={watchlistItems.length}
             publishedIssueCount={riskItems.length + operatingChanges.length}
             execMode={execMode}
             execImpactByTitle={execImpactByTitle}
@@ -2233,16 +2239,22 @@ function riskExposureSubtitle() {
               <Link to="/risks"><button className="secondary-button">Open Risks →</button></Link>
             </div>
             <p className="dashboard-subtitle" style={{ marginTop: 0 }}>
-              {pluralize(riskItems.length + operatingChanges.length, "published item")} · {formatExecutiveEstimate(execTotalRisk)} total value at stake · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
+              {pluralize(riskItems.length + operatingChanges.length, "published item")} · Downside {formatExecutiveEstimate(execRiskSectionTotal)} · Favorable relief {formatExecutiveEstimate(execChangeSectionTotal)} · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
             </p>
             <ul className="gs-register-preview">
-              {[...riskItems, ...operatingChanges].slice(0, 5).map((risk) => (
-                <li key={risk.id} className="gs-register-preview-row">
-                  <span className="gs-register-preview-title">{risk.risk_title}</span>
-                  <span className="badge">{isTariffIssue(risk) ? "Operating Change" : "Risk"}</span>
-                  <span className="gs-register-preview-val">{execByIssueId.get(risk.id)?.display ?? "Needs validation"}</span>
-                </li>
-              ))}
+              {[...riskItems, ...operatingChanges].slice(0, 5).map((risk) => {
+                // Issue type from the canonical section/direction — never title heuristics.
+                const isChange = risk.display_section === "operating_changes" || (risk as any).issue_category === "operating_change";
+                const favorable = (risk as any).issue_direction === "favorable" || (risk as any).issue_direction === "favorable_with_residual_exposure";
+                const typeLabel = isChange ? (favorable ? "Favorable Change" : "Operating Change") : "Risk";
+                return (
+                  <li key={risk.id} className="gs-register-preview-row">
+                    <span className="gs-register-preview-title">{risk.risk_title}</span>
+                    <span className="badge">{typeLabel}</span>
+                    <span className="gs-register-preview-val">{execByIssueId.get(risk.id)?.display ?? "Needs validation"}</span>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         )}
@@ -2315,8 +2327,10 @@ function riskExposureSubtitle() {
         </section>
         )}
 
-        {/* 5. Opportunity Pipeline (dashboard — one coherent section) */}
-        {view === "dashboard" && (
+        {/* 5. Opportunity Pipeline (dashboard — one coherent section).
+            Hidden when there is nothing to show (0 approved + 0 pending) to keep the
+            demo/customer dashboard focused. */}
+        {view === "dashboard" && (publishedOpportunities.length > 0 || candidateQueueItems.length > 0) && (
         <section className="card" id="opportunities">
           <div className="card-header">
             <div>
@@ -2421,28 +2435,40 @@ function riskExposureSubtitle() {
         <>
           <div id="support">
             {/* Calibration Summary — compact status; full workbench lives at /calibration */}
-            <CalibrationSummaryCard controller={calibrationController} />
+            <CalibrationSummaryCard controller={calibrationController} publishedCount={riskItems.length + operatingChanges.length} watchlistBlocked={watchlistItems.length} />
 
             {/* Source Coverage — free/public external data powering verified shocks */}
             <SourceCoverageCard companyId={company?.id ?? null} />
           </div>
 
           <div id="outcomes">
-            {/* Forecast Accuracy / Outcome Tracking */}
-            <ForecastAccuracyPanel rows={forecastRows} execMode={execMode} />
+            {/* Forecast Accuracy / Outcome Tracking — only once at least one forecast
+                has a resolved actual outcome; otherwise it's empty noise on the demo. */}
+            {forecastRows.some((r) => r.actualImpact !== null) && (
+              <ForecastAccuracyPanel rows={forecastRows} execMode={execMode} />
+            )}
 
             {/* Company Model — compact with expandable sections */}
             <CompanyModelSection company={company} entities={entities} getEntities={getEntities} />
           </div>
 
-          {/* Automatic intelligence updates — schedule status + run history */}
-          <SchedulerStatusCard
-            companyId={company?.id ?? null}
-            onRunNow={handleRunIntelligenceUpdate}
-            running={busy === "pipeline" || pipelineState.running}
-            refreshKey={schedulerRefresh}
-            canWrite={!isDemoMode()}
-          />
+          {/* Automatic intelligence updates — schedule status + run history.
+              Operator/admin only: the schedule + run-history surface is a dev/ops
+              console, hidden entirely from the buyer/demo dashboard. */}
+          {canViewAdminControls() && (
+            <SchedulerStatusCard
+              companyId={company?.id ?? null}
+              onRunNow={handleRunIntelligenceUpdate}
+              running={busy === "pipeline" || pipelineState.running}
+              refreshKey={schedulerRefresh}
+              canWrite={canViewAdminControls()}
+              currentRegister={{
+                published: riskItems.length + operatingChanges.length,
+                pending: candidateQueueItems.filter(i => i.gateResult.decision === "candidate_review").length,
+                quarantined: candidateQueueItems.filter(i => i.gateResult.decision === "quarantine").length,
+              }}
+            />
+          )}
         </>
         )}
 
@@ -2477,7 +2503,7 @@ function riskExposureSubtitle() {
           <section className="card">
             <div className="card-header">
               <div>
-                <h2 className="section-title">Quality Gate</h2>
+                <h2 className="section-title">{canViewAdminControls() ? "Quality Gate" : "Publishing criteria"}</h2>
               </div>
               <span className="badge">{candidateQueueItems.length} in review</span>
             </div>
@@ -2487,14 +2513,17 @@ function riskExposureSubtitle() {
           </section>
         )}
 
-        {/* Risks page: full intelligence run history (manual + scheduled) */}
-        {view === "risks" && (
+        {/* Risks page: full intelligence run history (manual + scheduled).
+            Operator/admin-only — it exposes historical/debug run rows (including old
+            scenario-modeled runs) that should not appear in the normal customer/demo
+            view. Gated behind the Advanced / admin controls toggle. */}
+        {view === "risks" && showAdvancedPipeline && canViewAdminControls() && (
           <section className="card">
             <div className="card-header">
               <div>
                 <h2 className="section-title">Intelligence Run History</h2>
                 <p className="dashboard-subtitle" style={{ marginTop: 4, marginBottom: 0 }}>
-                  Every manual and scheduled intelligence update, with counts and outcomes.
+                  Operator view · every manual and scheduled intelligence update, with counts and outcomes.
                 </p>
               </div>
             </div>
@@ -2521,7 +2550,7 @@ function buildExecMemoLines(opts: {
   execByIssueId: Map<string, ExecutiveEstimate>;
   companyName: string;
 }): { prefix: string; className: string; text: string }[] {
-  const { execTotalRisk, riskItems, operatingChanges, watchlistItems, actions, execByIssueId, companyName } = opts;
+  const { riskItems, operatingChanges, watchlistItems, actions, execByIssueId, companyName } = opts;
   if (riskItems.length === 0 && operatingChanges.length === 0) return [];
 
   const co = companyName || "your company";
@@ -2536,14 +2565,37 @@ function buildExecMemoLines(opts: {
   };
   const actionFor = (r: Risk) => actions.find((a) => a.risk_id === r.id) ?? null;
 
-  const total = formatExecutiveEstimate(execTotalRisk).replace("~", "");
   const activeCount = riskItems.length + operatingChanges.length;
   const lines: { prefix: string; className: string; text: string }[] = [];
 
+  const allIssues = [...riskItems, ...operatingChanges];
+  // Direction-split totals — downside risk and favorable relief are reported separately,
+  // never merged into one "value at stake" figure. Same section basis as the dashboard
+  // execRiskSectionTotal / execChangeSectionTotal.
+  const downsideTotal = sumExecutiveEstimates(
+    riskItems.map((r) => execByIssueId.get(r.id)).filter((e): e is ExecutiveEstimate => !!e)
+  );
+  const favorableTotal = sumExecutiveEstimates(
+    operatingChanges.map((r) => execByIssueId.get(r.id)).filter((e): e is ExecutiveEstimate => !!e)
+  );
+  const downsideStr = formatExecutiveEstimate(downsideTotal).replace("~", "");
+  const favorableStr = formatExecutiveEstimate(favorableTotal).replace("~", "");
+  const hasOfficialMetrics = allIssues.some(r =>
+    ["official_structured_metric", "manual_structured_metric"].includes((r as any).numeric_basis_type ?? "")
+  );
+  const hasArticleClaims = allIssues.some(r => (r as any).numeric_basis_type === "article_numeric_claim");
+  const sourcePhrase = hasOfficialMetrics
+    ? "official BLS/EIA numeric metrics"
+    : hasArticleClaims
+      ? "article-extracted numeric claims (validation required)"
+      : "company calibration estimates";
+  const reliefClause = favorableTotal > 0
+    ? ` and approximately ${favorableStr} of favorable fuel-surcharge relief`
+    : "";
   lines.push({
     prefix: "SUMMARY",
     className: "memo-act",
-    text: `GroundSense found approximately ${total} of quantified value at stake for ${co} across ${activeCount} active operating issue${activeCount === 1 ? "" : "s"}, tied to verified external signals and company-specific exposure.`,
+    text: `GroundSense mapped ${sourcePhrase} to ${co} calibration data, identifying approximately ${downsideStr} of downside exposure${reliefClause} across ${activeCount} active operating issue${activeCount === 1 ? "" : "s"}.`,
   });
 
   // ACT NOW — top published risk (Act-triaged first, then largest impact).
@@ -2554,8 +2606,12 @@ function buildExecMemoLines(opts: {
     return Number(b.impact_high || 0) - Number(a.impact_high || 0);
   })[0] ?? null;
   if (topRisk) {
-    const evidence = getIssueModelStatus(topRisk.methodology).status === "evidence_backed"
-      ? "Evidence-backed" : "Scenario-modeled";
+    const topBtype = (topRisk as any).numeric_basis_type ?? "no_numeric_basis";
+    const evidence = ["official_structured_metric", "manual_structured_metric"].includes(topBtype)
+      ? "Official metric-backed"
+      : topBtype === "article_numeric_claim"
+        ? "Secondary article/context signal"
+        : "Scenario-modeled";
     const act = actionFor(topRisk);
     lines.push({
       prefix: `1. ACT NOW — ${topRisk.risk_title}`,
@@ -2584,10 +2640,17 @@ function buildExecMemoLines(opts: {
     });
   }
 
+  // Only mention scenario-modeled issues if any PUBLISHED issue actually lacks a
+  // numeric (metric or article-claim) basis. With an all-metric-backed register
+  // the scenario caveat is stale and erodes trust, so it is omitted.
+  const METRIC_OR_CLAIM = ["official_structured_metric", "manual_structured_metric", "company_structured_metric", "article_numeric_claim"];
+  const hasScenarioPublished = allIssues.some(r => !METRIC_OR_CLAIM.includes((r as any).numeric_basis_type ?? "no_numeric_basis"));
   lines.push({
     prefix: "MODEL BASIS",
     className: "memo-caveat",
-    text: "Estimates derive from verified external metrics and company calibration. Scenario-modeled issues are labeled and require company-specific validation before realization.",
+    text: hasScenarioPublished
+      ? "Estimates derive from verified external metrics and company calibration. Scenario-modeled issues are labeled and require company-specific validation before realization."
+      : "Estimates derive from official external metrics (BLS/EIA) mapped to company calibration data.",
   });
   return lines;
 }
@@ -2607,7 +2670,6 @@ function CompactMemoSection({
   candidateQueueCount = 0,
   quarantineCount = 0,
   reviewCount = 0,
-  totalGeneratedCount = 0,
   execMode = false,
   execTotalRisk = 0,
   actions = [],
@@ -2627,13 +2689,18 @@ function CompactMemoSection({
   candidateQueueCount?: number;
   quarantineCount?: number;
   reviewCount?: number;
-  totalGeneratedCount?: number;
   execMode?: boolean;
   execTotalRisk?: number;
   actions?: ActionItem[];
   execByIssueId?: Map<string, ExecutiveEstimate>;
 }) {
   const [briefExpanded, setBriefExpanded] = useState(false);
+
+  // Canonical counts — the brief MUST agree with the dashboard & risk page.
+  // Published = active risk + operating-change rows (gate_status published).
+  const publishedCount = riskItems.length + operatingChanges.length;
+  const watchCount = watchlistItems.length;
+  const generatedShown = publishedCount + watchCount + candidateQueueCount;
 
   // Executive memo lines — derived from this company's actual published rows.
   const execMemoLines = buildExecMemoLines({
@@ -2688,8 +2755,8 @@ function CompactMemoSection({
             <div className="memo-summary-line memo-gate-line">
               <span className="memo-line-prefix">QUALITY GATE</span>
               <span className="memo-line-body">
-                GroundSense reviewed {totalGeneratedCount} generated candidate{totalGeneratedCount !== 1 ? "s" : ""}.{" "}
-                {totalGeneratedCount - candidateQueueCount} published
+                GroundSense reviewed {generatedShown} candidate{generatedShown !== 1 ? "s" : ""}.{" "}
+                {publishedCount} published, {watchCount} watch
                 {reviewCount > 0 ? `, ${reviewCount} sent to review` : ""}
                 {quarantineCount > 0 ? `, ${quarantineCount} quarantined` : ""}.{" "}
                 Blocked candidates are excluded from actions, forecasts, metrics, and executive brief until promoted.
@@ -2718,8 +2785,8 @@ function CompactMemoSection({
             <div className="memo-expanded-line memo-caveat">
               <span className="memo-expanded-prefix">QUALITY GATE</span>
               <p className="memo-expanded-body">
-                GroundSense reviewed {totalGeneratedCount} generated candidate{totalGeneratedCount !== 1 ? "s" : ""}.{" "}
-                {totalGeneratedCount - candidateQueueCount} were published to this brief
+                GroundSense reviewed {generatedShown} candidate{generatedShown !== 1 ? "s" : ""}.{" "}
+                {publishedCount} published ({watchCount} watch)
                 {candidateQueueCount > 0 ? (
                   <>
                     {", "}
@@ -2927,18 +2994,29 @@ function GroupedExposurePaths({
   );
 }
 
-function QualityGateReport({ gateResult }: { gateResult: IssueGateResult }) {
+function QualityGateReport({ gateResult, confidence = 0, metricBacked = false }: { gateResult: IssueGateResult; confidence?: number; metricBacked?: boolean }) {
   const [open, setOpen] = useState(false);
   const score = gateResult.qualityScore;
-  const qualityLabel = score >= 70 ? "High" : score >= 45 ? "Medium" : "Low";
-  const labelColor = score >= 70 ? "var(--success)" : score >= 45 ? "var(--warning)" : "var(--danger)";
-  const why = gateResult.forecastEligible
+  let qualityLabel = score >= 70 ? "High" : score >= 45 ? "Medium" : "Low";
+  // A published, metric-backed issue with high model confidence must not read
+  // "Quality: Low" — the evidence-alignment heuristic understates quality for
+  // numeric-shock issues (their evidence is one official metric, not articles).
+  // Floor to Medium and surface the reason rather than contradict the publish status.
+  const floored = qualityLabel === "Low" && metricBacked && confidence > 70;
+  if (floored) qualityLabel = "Medium";
+  const labelColor = qualityLabel === "High" ? "var(--success)" : qualityLabel === "Medium" ? "var(--warning)" : "var(--danger)";
+  // Note: deliberately NO numeric confidence here — the card already shows the
+  // issue's confidence, and a second number on this line read as a contradicting
+  // "model confidence" value.
+  const why = floored
+    ? "official metric-backed estimate; alignment heuristic understates numeric-shock issues"
+    : gateResult.forecastEligible
     ? "verified external source + company exposure + actionability"
     : "evidence aligned and company-relevant; forecast pending validation";
   return (
     <div style={{ borderTop: "1px solid var(--border-default)", marginTop: 12, paddingTop: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Quality Gate</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{canViewAdminControls() ? "Quality Gate" : "Publishing criteria"}</span>
         <span style={{ fontSize: 11, background: "var(--success-bg)", color: "var(--success)", fontWeight: 650, padding: "1px 7px", borderRadius: 4 }}>Published ✓</span>
         <span style={{ fontSize: 12, fontWeight: 700, color: labelColor }}>Quality: {qualityLabel}</span>
         <button className="text-button" style={{ fontSize: 12, marginLeft: "auto" }} onClick={() => setOpen(v => !v)}>
@@ -3035,15 +3113,17 @@ function RiskCard({
           <div className="record-badge-row">
             <span className="orange-badge">
               #{displayRank} {execMode
-                ? (execEstimate?.kind === "tariff" ? "Operating Change" : "Operating Risk")
-                : (modelStatus.status === "scenario_fallback" ? "Scenario Risk" : "Risk")}
+                ? ((risk.display_section === "operating_changes" || (risk as any).issue_category === "operating_change")
+                    ? (((risk as any).issue_direction === "favorable" || (risk as any).issue_direction === "favorable_with_residual_exposure") ? "Favorable Change" : "Operating Change")
+                    : "Operating Risk")
+                : ((risk as any).numeric_basis_type === "no_numeric_basis" && modelStatus.status === "scenario_fallback" ? "Scenario Risk" : "Risk")}
             </span>
             {execMode ? (
               execEstimate && execEstimate.value !== null && (
                 <span className="model-status model-status-evidence">{execEstimate.sourceLabel}</span>
               )
             ) : (
-              <ModelStatusBadge methodology={risk.methodology} />
+              <ModelStatusBadge methodology={risk.methodology} risk={risk} />
             )}
             {movementLabel && movementLabel !== "Unchanged" && (
               <span className="movement-chip">{movementLabel}</span>
@@ -3156,9 +3236,13 @@ function RiskCard({
               businessImpact: getRiskBusinessImpact(risk),
             }}
             issueForPath={risk}
-            pathShockLabel={isFreightIssue(risk) ? "BLS freight/logistics PPI +0.8%" : isTariffIssue(risk) ? "Tariff 25% → 15%" : undefined}
+            pathShockLabel={pathShockLabelFor(risk)}
           />
-          {provenance && <ExternalShockProvenance prov={provenance} />}
+          {/* Legacy verified_shocks provenance (scenario tone) only applies to
+              non-metric-backed issues. Metric/article issues show their real
+              basis via the methodology section — never the "scenario assumption /
+              no verified external metric" provenance card. */}
+          {provenance && (((risk as any).numeric_basis_type ?? "no_numeric_basis") === "no_numeric_basis") && <ExternalShockProvenance prov={provenance} />}
           {/* Scenario Editor (low/mid/high) is hidden by default in executive mode — it only
               appears when the user opens "Show methodology / sensitivity". */}
           {(!execMode || showMethod) && (isFreightIssue(risk) || isTariffIssue(risk) || risk.issue_category?.includes("commodity")) && (
@@ -3173,8 +3257,16 @@ function RiskCard({
             issueTitle={risk.risk_title}
             issueType="risk"
             ownerFromAction={ownerFromAction}
+            issueCreatedAt={(risk as any).created_at ?? null}
+            issueUpdatedAt={(risk as any).last_updated ?? (risk as any).updated_at ?? null}
           />
-          {gateResult && <QualityGateReport gateResult={gateResult} />}
+          {gateResult && (
+            <QualityGateReport
+              gateResult={gateResult}
+              confidence={Number(risk.confidence ?? 0)}
+              metricBacked={["official_structured_metric", "manual_structured_metric", "company_structured_metric", "article_numeric_claim"].includes(String((risk as any).numeric_basis_type ?? ""))}
+            />
+          )}
         </>
       )}
     </div>
@@ -3203,8 +3295,10 @@ function OperatingChangeCard({
   // Canonical executive estimate is the source of truth (same as Dashboard/Exposure Graph).
   // It supersedes any stale stored residual / article-extracted methodology.
   const useExec = execMode && !!execEstimate && execEstimate.value !== null;
+  // Operating changes are FAVORABLE (e.g. diesel/fuel-surcharge relief, tariff relief).
+  // Never describe them as downside "value at stake".
   const execBusinessImpact = useExec
-    ? `Applied to Fastenal's calibrated steel-linked import exposure, the verified tariff metric implies approximately ${execEstimate!.display} of value at stake. ${execEstimate!.caveat ?? ""}`.trim()
+    ? `Approximately ${execEstimate!.display} of favorable impact under review on the calibrated exposure base. ${execEstimate!.caveat ?? ""}`.trim()
     : (risk.risk_interaction || risk.business_impact);
 
   return (
@@ -3224,7 +3318,7 @@ function OperatingChangeCard({
 
       <div className="mini-grid mini-grid-2">
         <Mini
-          label={useExec ? "Value at stake" : "Residual exposure"}
+          label={useExec ? "Favorable impact" : "Residual exposure"}
           value={useExec ? execEstimate!.display : getResidualExposureDisplay(risk)}
           explanation={explainRiskExposure(risk)}
         />
@@ -3273,11 +3367,22 @@ function OperatingChangeCard({
             businessImpact: execBusinessImpact,
           }}
           issueForPath={risk}
-          pathShockLabel={isTariffIssue(risk) ? "Tariff 25% → 15%" : undefined}
+          pathShockLabel={pathShockLabelFor(risk)}
         />
       )}
     </div>
   );
+}
+
+// Canonical external-shock label for a risk's exposure path — derived from the
+// stored numeric basis (source + exact %), never hardcoded. Returns undefined
+// when there is no numeric basis (watch items).
+function pathShockLabelFor(risk: any): string | undefined {
+  const v = risk?.numeric_basis_value;
+  const src = risk?.numeric_basis_source_label;
+  if (v == null || !src) return undefined;
+  const u = risk.numeric_basis_unit === "pct" ? "%" : (risk.numeric_basis_unit ?? "");
+  return `${src} · ${v > 0 ? "+" : ""}${v}${u}`;
 }
 
 function WatchlistCard({
@@ -3300,8 +3405,10 @@ function WatchlistCard({
         <div className="watchlist-compact-left">
           <div className="record-badge-row">
             <span className="gray-badge">Watchlist</span>
-            <span className="watchlist-confidence-chip">{clampPercent(risk.confidence)}% conf.</span>
+            {/* Signal confidence — NOT a business-impact confidence (the item is unsized). */}
+            <span className="watchlist-confidence-chip">Signal confidence {clampPercent(risk.confidence)}%</span>
             <span className="direction-chip direction-chip-sm">{formatIssueDirection(risk.issue_direction || "uncertain")}</span>
+            <span className="watchlist-unsized-chip">Unsized directional signal</span>
           </div>
           <h3 className="watchlist-compact-title">{risk.risk_title}</h3>
           <p className="watchlist-compact-body">{watchlistExplanation}</p>
@@ -3636,10 +3743,17 @@ function DetailPanel({
 
   // Replace generic stored shock placeholders (e.g. "1% price move", "1% move") in the
   // qualitative impact path with the canonical verified-shock label for this issue.
+  const issueNBType = (issueForPath as any)?.numeric_basis_type ?? "no_numeric_basis";
+  const issueNBValue = (issueForPath as any)?.numeric_basis_value;
+  const issueNBUnit = (issueForPath as any)?.numeric_basis_unit ?? "pct";
+  const issueNBSnippet = (issueForPath as any)?.numeric_basis_snippet;
+  const articleShockLabel = issueNBType === "article_numeric_claim" && issueNBValue != null
+    ? `${issueNBValue}${issueNBUnit === "pct" ? "%" : ` ${issueNBUnit}`} article-claimed signal${issueNBSnippet ? ` ("${String(issueNBSnippet).slice(0, 40)}…")` : ""}`
+    : null;
   const sanitizedPathNodes = bestPathNodes
     ? bestPathNodes.map((n: any) =>
         /\b1%\s*(price\s*)?move\b|\bprice move\b/i.test(String(n))
-          ? (pathShockLabel || "Verified external price signal")
+          ? (pathShockLabel || articleShockLabel || "External price signal")
           : n
       )
     : null;
@@ -3664,15 +3778,24 @@ function DetailPanel({
       "COGS relief / margin impact",
     ],
   };
+  // Metric-backed issues render their REAL stored exposure_path (each node's
+  // detail carries the true source + exact %), never the hardcoded canonical
+  // scenario path. The canonical freight/tariff paths apply ONLY to legacy
+  // scenario-backed issues.
+  const issueMetricBacked = ["official_structured_metric", "manual_structured_metric", "company_structured_metric", "article_numeric_claim"].includes(issueNBType);
+  const exposurePathDetails = issueMetricBacked && safeExposurePath.length > 0
+    && safeExposurePath.every((p: any) => p && typeof p === "object" && "detail" in p)
+    ? safeExposurePath.map((p: any) => String(p.detail))
+    : null;
   const canonicalPath =
-    issueForPath && "risk_title" in issueForPath
+    !issueMetricBacked && issueForPath && "risk_title" in issueForPath
       ? isFreightIssue(issueForPath as Risk)
         ? CANONICAL_IMPACT_PATHS.freight
         : isTariffIssue(issueForPath as Risk)
         ? CANONICAL_IMPACT_PATHS.tariff
         : null
       : null;
-  const cleanPathNodes = canonicalPath ?? sanitizedPathNodes;
+  const cleanPathNodes = exposurePathDetails ?? canonicalPath ?? sanitizedPathNodes;
 
   return (
     <div className="analysis-panel">
@@ -3693,7 +3816,7 @@ function DetailPanel({
           className={`analysis-tab${activeTab === "audit" ? " active" : ""}`}
           onClick={() => setActiveTab("audit")}
         >
-          Model Audit
+          {canViewAdminControls() ? "Model Audit" : "Methodology"}
         </button>
       </div>
 
@@ -3983,6 +4106,11 @@ function ExplanationTooltipContent({
               </span>
             );
           })}
+          {explanation.inputsProvenance && (
+            <span style={{ ...lineStyle, marginTop: 4, color: "var(--text-muted)", fontStyle: "italic" }}>
+              Source: {explanation.inputsProvenance}
+            </span>
+          )}
         </div>
       )}
 
@@ -4311,7 +4439,6 @@ function getConfidenceDecomposition(
   evidence?: any[],
   issue?: Risk | Opportunity | null
 ): Array<{ label: string; value: string; level: "High" | "Medium" | "Low" | "Needs validation" }> {
-  const status = getIssueModelStatus(methodology);
   const items = Array.isArray(evidence) ? evidence : [];
   const avgQuality = items.length > 0
     ? Math.round(items.reduce((s, e) => s + (Number(e.source_quality) || 50), 0) / items.length)
@@ -4323,18 +4450,24 @@ function getConfidenceDecomposition(
     : items.length > 0 ? "Low"
     : "Needs validation";
 
-  const mappingLevel =
-    status.status === "evidence_backed" ? "High"
-    : status.status === "scenario_fallback" ? "Medium"
+  const typed = issue as any;
+  const nbType: string = typed?.numeric_basis_type ?? "no_numeric_basis";
+  const isOfficialMetric = ["official_structured_metric", "manual_structured_metric"].includes(nbType);
+  const isArticleClaim = nbType === "article_numeric_claim";
+  const isScenario = nbType === "no_numeric_basis";
+
+  const mappingLevel: "High" | "Medium" | "Low" | "Needs validation" =
+    isOfficialMetric ? "High"
+    : isArticleClaim ? "Medium"
+    : isScenario ? "Needs validation"
     : "Needs validation";
 
   const hasBase = !!methodology?.base_exposure_value;
   const exposureLevel =
-    hasBase && status.status === "evidence_backed" ? "High"
+    hasBase && isOfficialMetric ? "High"
     : hasBase ? "Medium"
     : "Needs validation";
 
-  const typed = issue as any;
   const hasAction = !!(typed?.decision_required || typed?.action_required);
   const actionLevel = hasAction ? "Medium" : "Needs validation" as const;
 
@@ -4346,7 +4479,13 @@ function getConfidenceDecomposition(
     },
     {
       label: "Mapping confidence",
-      value: status.status === "evidence_backed" ? "Direct article match" : status.status === "scenario_fallback" ? "Scenario assumption" : "Not mapped",
+      value: isOfficialMetric
+        ? "Verified external metric — structured data source"
+        : isArticleClaim
+          ? `Article-claimed metric · ${typed?.numeric_basis_snippet ? `"${String(typed.numeric_basis_snippet).slice(0, 60)}…"` : "validation required"}`
+          : isScenario
+            ? "No verified external number — scenario assumption used"
+            : "Not mapped",
       level: mappingLevel,
     },
     {
@@ -4372,13 +4511,17 @@ function getIssuePLBridge(issue?: Risk | Opportunity | null): string {
   if (section === "opportunity" || "revenue_low" in issue) {
     return "Revenue ↑ · Gross margin ↑ (volume leverage) · SG&A ↑ (sales cost) — Upside directional only. Requires segment confirmation.";
   }
+  // Fuel / diesel surcharge relief is FAVORABLE — never the generic downside bridge.
+  if (category.includes("fuel") || title.includes("diesel") || title.includes("fuel-surcharge") || title.includes("fuel surcharge")) {
+    return "Freight/fuel expense ↓ · Gross margin/EBITDA ↑ · Cash savings subject to carrier surcharge pass-through — Favorable relief; timing depends on when carriers update fuel-surcharge tables.";
+  }
   if (category.includes("freight") || category.includes("logistics") || title.includes("freight")) {
     return "COGS ↑ (freight in) · SG&A ↑ (outbound freight) · Gross margin ↓ — Direct cost impact. Pass-through rate determines net P&L effect.";
   }
   if (category.includes("tariff") || category.includes("trade") || title.includes("tariff")) {
     return "COGS ↓ potential relief · Gross margin ↑ if supplier landed costs update · Residual exposure remains until supplier/PO validation.";
   }
-  if (category.includes("commodity") || category.includes("steel") || category.includes("copper") || title.includes("steel") || title.includes("copper")) {
+  if (category.includes("commodity") || category.includes("steel") || category.includes("copper") || category.includes("aluminum") || title.includes("steel") || title.includes("copper") || title.includes("aluminum")) {
     return "COGS ↑ (raw material) · Gross margin ↓ · Revenue ↔ (pass-through lag) — Commodity cost pressure. Lag and hedging determine timing.";
   }
   if (category.includes("competitor") || category.includes("market_share") || title.includes("competitor")) {
@@ -4435,6 +4578,26 @@ function getIssueModelStatus(methodology?: Methodology | null): {
   const method: any = methodology || {};
   const inputs = getMethodologyCalculationInputs(method);
 
+  // Canonical: the stored numeric_basis_type is the single source of truth for the
+  // model badge. A metric-backed issue is NEVER labeled scenario/needs-calibration.
+  const nbType = String(method.numeric_basis_type || "");
+  if (["official_structured_metric", "manual_structured_metric", "company_structured_metric"].includes(nbType)) {
+    return {
+      status: "evidence_backed",
+      label: "Official metric",
+      className: "model-status model-status-evidence",
+      exposureLabel: "Official metric-backed exposure",
+    };
+  }
+  if (nbType === "article_numeric_claim") {
+    return {
+      status: "evidence_backed",
+      label: "Article-claimed metric",
+      className: "model-status model-status-evidence",
+      exposureLabel: "Article-claimed exposure · validation required",
+    };
+  }
+
   if (
     method.calibration_status === "needs_calibration" ||
     method.formula_status === "not_calculated"
@@ -4457,9 +4620,9 @@ function getIssueModelStatus(methodology?: Methodology | null): {
   ) {
     return {
       status: "evidence_backed",
-      label: "Evidence-backed",
+      label: "Secondary article/context signal",
       className: "model-status model-status-evidence",
-      exposureLabel: "Evidence-backed exposure",
+      exposureLabel: "Secondary article/context signal · validation required",
     };
   }
 
@@ -4474,9 +4637,9 @@ function getIssueModelStatus(methodology?: Methodology | null): {
   ) {
     return {
       status: "evidence_backed",
-      label: "Source-backed",
+      label: "Official metric-backed",
       className: "model-status model-status-evidence",
-      exposureLabel: "Source-backed exposure",
+      exposureLabel: "Official metric-backed exposure",
     };
   }
 
@@ -4598,11 +4761,20 @@ function formatRejectedShockValues(methodology?: Methodology | null) {
 
 function ModelStatusBadge({
   methodology,
+  risk,
 }: {
   methodology?: Methodology | null;
+  risk?: Risk | { numeric_basis_type?: string } | null;
 }) {
+  // Prefer numeric_basis_type over stale methodology.shock_source (FIX 3).
+  const btype = (risk as any)?.numeric_basis_type ?? "no_numeric_basis";
+  if (btype === "article_numeric_claim") {
+    return <span className="model-status model-status-article">Article-claimed metric</span>;
+  }
+  if (btype === "official_structured_metric" || btype === "manual_structured_metric") {
+    return <span className="model-status model-status-evidence">Verified external metric</span>;
+  }
   const status = getIssueModelStatus(methodology);
-
   return <span className={status.className}>{status.label}</span>;
 }
 
@@ -4796,7 +4968,20 @@ function deriveActionRoiFields(
       effortLevel: "Medium",
       successCondition: "Top inbound lanes classified by contract coverage, surcharge exposure, and mitigation option.",
       nextStep: "Identify top inbound lanes with spot or surcharge exposure and compare current contract coverage.",
-      decisionTrigger: "spot exposure exceeds 20% or new surcharges hit top-volume lanes",
+      decisionTrigger: "Escalate if spot exposure exceeds 20% or new surcharges hit top-volume lanes.",
+    };
+  }
+
+  // Fuel / diesel (favorable fuel-surcharge relief operating change). Escalation
+  // must be a real condition — not a repeat of the action itself.
+  if (title.includes("diesel") || title.includes("fuel-surcharge") || title.includes("fuel surcharge")) {
+    return {
+      owner: action.owner || "Head of Logistics",
+      deadline: action.deadline || null,
+      effortLevel: "Low",
+      successCondition: "Carrier fuel-surcharge tables reviewed; diesel relief captured on fuel-sensitive/spot lanes this billing cycle.",
+      nextStep: "Review carrier fuel-surcharge tables and fuel clauses on fuel-sensitive lanes; capture relief before carriers reset surcharges.",
+      decisionTrigger: "Escalate if carriers do not reflect diesel relief in fuel-surcharge tables during the current billing cycle.",
     };
   }
 
@@ -4808,7 +4993,7 @@ function deriveActionRoiFields(
       effortLevel: "Medium",
       successCondition: "Supplier country-of-origin confirmed, import-category exposure sized, landed-cost assumptions updated.",
       nextStep: "Pull supplier country-of-origin list and validate steel-linked import exposure; flag aluminum/copper separately if additional tariff metrics or supplier evidence are available.",
-      decisionTrigger: "exposed imports exceed $10M or suppliers have not confirmed updated landed costs",
+      decisionTrigger: "Escalate if exposed imports exceed $10M or suppliers have not confirmed updated landed costs.",
     };
   }
 
@@ -4819,9 +5004,9 @@ function deriveActionRoiFields(
       owner: action.owner || "Head of Procurement",
       deadline: action.deadline || null,
       effortLevel: "Medium",
-      successCondition: "Supplier-level landed cost and tariff impact validated by SKU.",
-      nextStep: "Review commodity spend by supplier and confirm country-of-origin for top-volume items.",
-      decisionTrigger: "tariff exposure on metals exceeds $5M net after pass-through",
+      successCondition: "Supplier-level price updates and unpassed exposure validated by SKU against the index move.",
+      nextStep: "Review commodity spend by supplier, confirm supplier price updates vs the PPI move, and check open-PO repricing windows.",
+      decisionTrigger: "Escalate if supplier price updates exceed the index move, unpassed exposure exceeds the materiality threshold, or open PO repricing occurs within 30 days.",
     };
   }
 
@@ -4833,7 +5018,7 @@ function deriveActionRoiFields(
       effortLevel: "Low",
       successCondition: "CRM pipeline confirms quote growth or order strength in manufacturing accounts.",
       nextStep: "Pull CRM data for manufacturing account segment — quote volume trend and win rate last 90 days.",
-      decisionTrigger: "CRM confirms quote growth >10% or order strength in target accounts",
+      decisionTrigger: "Escalate if CRM confirms quote growth >10% or order strength in target accounts.",
     };
   }
 
@@ -4847,10 +5032,16 @@ function deriveActionRoiFields(
       ? "Exposure validated and mitigation option identified."
       : "Issue reviewed and owner confirmed.",
     nextStep: linkedRisk?.action_required
-      ? String(linkedRisk.action_required).slice(0, 120)
+      ? clampToWord(String(linkedRisk.action_required), 180)
       : "Review with relevant owner and confirm next steps.",
     decisionTrigger: getDecisionTrigger(linkedRisk ?? linkedOpp as any),
   };
+}
+
+// Truncate on a word boundary (never mid-word) so action copy doesn't end like "befor".
+function clampToWord(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return text.slice(0, max).replace(/\s+\S*$/, "").replace(/[.,;:]$/, "") + "…";
 }
 
 function formatMoney(value: number | null | undefined) {
@@ -5073,41 +5264,35 @@ function explainDashboardMetric(type: string, options: Record<string, any>) {
 
   if (type === "risk_exposure") {
   return {
-    title: "Risk Exposure",
+    title: "Exposure Summary",
     formula:
-      "Downside total = sum of risk_register impact values for items in the Risk Register.",
+      "Downside = official metric-backed published risks. Favorable = official metric-backed favorable operating changes. Reported separately — never combined.",
     inputs: [
       {
-        label: "Displayed downside total",
-        value: `${formatMoney(options.low)}–${formatMoney(options.high)}`,
+        label: "Downside exposure (official metric-backed)",
+        value: `${formatMoney(options.downside || 0)} across ${options.downsideCount || 0} risks`,
       },
       {
-        label: "Evidence-backed downside",
-        value: `${formatMoney(options.evidenceBackedLow)}–${formatMoney(
-          options.evidenceBackedHigh
-        )} across ${options.evidenceBackedCount || 0} risks`,
+        label: "Favorable operating changes",
+        value: `${formatMoney(options.favorable || 0)} across ${options.favorableCount || 0} changes`,
       },
       {
-        label: "Scenario downside",
-        value: `${formatMoney(options.scenarioLow)}–${formatMoney(
-          options.scenarioHigh
-        )} across ${options.scenarioCount || 0} risks`,
+        label: "Watchlist (no dollar estimate)",
+        value: `${options.watchCount || 0} items`,
       },
       {
-        label: "Residual operating exposure",
-        value: `${formatMoney(options.residualLow)}–${formatMoney(
-          options.residualHigh
-        )} across ${options.residualCount || 0} operating changes`,
+        label: "Scenario exposure",
+        value: "$0 (no scenario-backed published issues)",
       },
       {
-        label: "Needs calibration",
-        value: `${options.needsCalibrationCount || 0} downside items`,
+        label: "Basis",
+        value: `${options.metricBackedCount || 0} official metric-backed · ${options.articleBackedCount || 0} article-claim-backed`,
       },
     ],
     source:
-      "risk_register impact_low and impact_high, split by methodology shock_source and calibration status.",
+      "risk_register.gate_status + numeric_basis_type + numeric_shocks + source_observations + formula_inputs (one truth system).",
     note:
-      "Scenario downside is shown separately from evidence-backed downside so cumulative, stale, or non-incremental percentages are not mistaken for modeled article shocks.",
+      "Downside risk and favorable relief are reported separately. No scenario-backed or article-shock dollars are published.",
   };
 }
 
@@ -5272,6 +5457,42 @@ function explainRiskExposure(risk: Risk): NumberExplanation {
     };
   }
 
+  // ── Basis-aware methodology (numeric_shock ledger) ────────────────────────
+  // Official/manual/company metric and article-claim issues render their REAL
+  // basis from first-class columns — NEVER the legacy "base exposure / article
+  // shock percent / verified article text" fields.
+  const nbTypeX = String((risk as any).numeric_basis_type ?? "no_numeric_basis");
+  const METRIC_TYPES = ["official_structured_metric", "manual_structured_metric", "company_structured_metric"];
+  if (METRIC_TYPES.includes(nbTypeX) || nbTypeX === "article_numeric_claim") {
+    const official = METRIC_TYPES.includes(nbTypeX);
+    const fi = ((risk as any).formula_inputs ?? {}) as Record<string, unknown>;
+    const srcLabel = (risk as any).numeric_basis_source_label ?? "source";
+    const nbVal = (risk as any).numeric_basis_value;
+    const nbUnit = ((risk as any).numeric_basis_unit === "pct" ? "%" : (risk as any).numeric_basis_unit) ?? "";
+    const prettyKey = (k: string) => k.replace(/_/g, " ").replace(/\bpct\b/g, "%").replace(/^\w/, (c) => c.toUpperCase());
+    const fmtInput = (k: string, v: unknown): string => {
+      const n = Number(v);
+      if (/spend|freight|result|exposed/.test(k) && Number.isFinite(n)) return formatMoney(n);
+      if (/share/.test(k) && Number.isFinite(n)) return `${Math.round(n * 100)}%`;
+      if (/pct|percent_change|change/.test(k) && Number.isFinite(n)) return `${n > 0 ? "+" : ""}${n}%`;
+      return v == null ? "—" : String(v);
+    };
+    const mInputs: ExplanationInput[] = Object.entries(fi)
+      .filter(([k]) => k !== "source_shock_id" && k !== "result")
+      .map(([k, v]) => ({ label: prettyKey(k), value: fmtInput(k, v) }));
+    mInputs.push({ label: "Metric", value: srcLabel });
+    if (nbVal != null) mInputs.push({ label: "Change", value: `${nbVal > 0 ? "+" : ""}${nbVal}${nbUnit}` });
+    if ((risk as any).business_estimate != null) mInputs.push({ label: "Formula result", value: formatMoney(Number((risk as any).business_estimate)) });
+    return {
+      title: official ? "Official metric exposure model" : "Article-claimed exposure model",
+      formula: (risk as any).formula || methodology.formula || "",
+      inputs: mInputs,
+      inputsProvenance: inputProvenanceLabel(risk),
+      source: `${official ? "Official metric" : "Article-claimed metric"} · ${srcLabel}${(risk as any).numeric_basis_snippet ? ` — ${String((risk as any).numeric_basis_snippet).slice(0, 140)}` : ""}`,
+      note: risk.exposure_interpretation || "Validate against current supplier/lane pricing before relying on this figure.",
+    };
+  }
+
   const formula =
     methodology.formula ||
     "Exposure = base exposure × shock percent × exposure adjustment";
@@ -5374,6 +5595,7 @@ function explainRiskExposure(risk: Risk): NumberExplanation {
         : "Risk exposure model",
     formula: cleanFormula,
     inputs: valueInputs,
+    inputsProvenance: inputProvenanceLabel(risk),
     source: sourceSentence,
     note:
       risk.exposure_interpretation ||
@@ -5570,6 +5792,10 @@ function classifyEvidenceSource(item: any): EvidenceTierInfo {
 function cleanShockSourceForDisplay(source: string): string {
   const s = String(source || "").toLowerCase();
 
+  // Numeric-shock-ledger basis types (single source of truth).
+  if (s.includes("official") || s.includes("structured_metric")) return "Official metric";
+  if (s.includes("article")) return "Article-claimed metric";
+
   if (s === "explicit_new_source_number" || s === "explicit_news_number") {
     return "From verified article text";
   }
@@ -5748,6 +5974,40 @@ function TrustAuditPanel({
           <div className="trust-row">
             <span className="trust-row-label">Formula used</span>
             <span className="trust-row-value">{formula}</span>
+          </div>
+        )}
+
+        {formula && (() => {
+          const f = formula.toLowerCase();
+          const inputs: string[] = [];
+          if (/freight spend/.test(f)) inputs.push("freight spend");
+          if (/spot/.test(f)) inputs.push("spot %");
+          if (/steel spend/.test(f)) inputs.push("steel spend");
+          if (/copper spend/.test(f)) inputs.push("copper spend");
+          if (/aluminum spend/.test(f)) inputs.push("aluminum spend");
+          if (/unpassed/.test(f)) inputs.push("unpassed %");
+          if (/fuel-exposed freight/.test(f)) inputs.push("fuel-exposed freight");
+          const src = isDemoMode()
+            ? "shared demo calibration (illustrative, not real company data)"
+            : "calibration table";
+          return (
+            <div className="trust-row">
+              <span className="trust-row-label">Company inputs</span>
+              <div className="trust-row-value">
+                {inputs.length > 0 && <span>{inputs.join(", ")}</span>}
+                <span className="trust-row-source">Source: {src}</span>
+              </div>
+            </div>
+          );
+        })()}
+
+        {formula && /fuel-exposed freight/i.test(formula) && (
+          <div className="trust-row">
+            <span className="trust-row-label">Base note</span>
+            <span className="trust-row-value">
+              Fuel-exposed freight base includes fuel-sensitive surchargeable lanes; it may differ from the
+              spot-exposed freight spend used in the Freight PPI issue.{isDemoMode() ? " In this demo the base is shared demo calibration (assumption)." : ""}
+            </span>
           </div>
         )}
 

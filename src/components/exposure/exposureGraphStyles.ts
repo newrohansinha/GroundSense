@@ -13,6 +13,8 @@ export const EXPOSURE_GRAPH_CSS = `
   border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px;
 }
 .gxg-chip-primary { background: var(--gs-accent-soft); border-color: var(--gs-border-strong); }
+.gxg-chip-favorable { background: var(--success-bg, var(--gs-accent-soft)); border-color: var(--success, var(--gs-border-strong)); }
+.gxg-chip-favorable .gxg-chip-value { color: var(--success, var(--gs-text)); }
 .gxg-chip-value { font-size: 18px; font-weight: 720; color: var(--gs-text); }
 .gxg-chip-label { font-size: 11px; color: var(--gs-text-muted); }
 

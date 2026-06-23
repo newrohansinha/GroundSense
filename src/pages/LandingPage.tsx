@@ -659,7 +659,7 @@ export default function LandingPage() {
                 See what market shocks
 
                 <br />
-                <span className="lp-headline-accent">COST you.</span>
+                <span className="lp-headline-accent">cost you.</span>
               </h1>
 
               <p className="lp-subtext">

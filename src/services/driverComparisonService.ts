@@ -46,6 +46,11 @@ const DRIVERS: DriverDef[] = [
     matchKeywords: ["freight", "shipping", "logistics", "ocean", "port", "carrier", "container"],
   },
   {
+    key: "fuel",
+    name: "Fuel / energy cost",
+    matchKeywords: ["diesel", "fuel", "energy", "crude", "oil"],
+  },
+  {
     key: "tariff",
     name: "Tariff / trade policy",
     matchKeywords: ["tariff", "trade", "import", "duty", "section 301", "trade policy"],
@@ -53,7 +58,7 @@ const DRIVERS: DriverDef[] = [
   {
     key: "steel",
     name: "Steel / metals pricing",
-    matchKeywords: ["steel", "metal", "iron", "fastener", "aluminum", "copper", "metals"],
+    matchKeywords: ["steel", "metal", "iron", "fastener", "metals"],
   },
   {
     key: "copper",
@@ -150,6 +155,11 @@ function matchOpportunity(driverDef: DriverDef, opp: OpportunityInput): boolean 
 // Robust model status extraction — handles compound strings like "scenario_fallback_no_explicit_freight_rate"
 function extractModelStatus(methodology: Record<string, unknown> | null | undefined): string {
   if (!methodology) return "unknown";
+  // Canonical: a numeric_shock-ledger basis is evidence-backed (single source of truth).
+  const nb = methodology.numeric_basis_type;
+  if (typeof nb === "string" && ["official_structured_metric", "manual_structured_metric", "company_structured_metric", "article_numeric_claim"].includes(nb)) {
+    return "evidence_backed";
+  }
   // Try top-level model_status first
   if (typeof methodology.model_status === "string") return methodology.model_status;
   // Try calculation_inputs.shock_source
@@ -207,7 +217,7 @@ function evidenceStrength(
 
 function qualityLabel(modelStatus: "evidence_backed" | "scenario_fallback" | "needs_calibration" | "unknown"): string {
   switch (modelStatus) {
-    case "evidence_backed": return "Evidence-backed rate";
+    case "evidence_backed": return "Official metric-backed rate";
     case "scenario_fallback": return "Scenario-modeled";
     case "needs_calibration": return "Needs company validation";
     default: return "Inferred from public data";
@@ -289,7 +299,7 @@ function buildReason(
   }
   if (status === "Act") {
     if (driverKey === "freight") return `Active scenario downside risk with modeled range. Priority ${priorityScore}/100. Logistics action open.`;
-    return `Evidence-backed exposure with priority score ${priorityScore}. Immediate action warranted.`;
+    return `Official metric-backed exposure with priority score ${priorityScore}. Immediate action warranted.`;
   }
   if (status === "Validate") {
     if (driverKey === "manufacturing_demand" || driverKey === "construction_demand") {
@@ -316,10 +326,11 @@ function buildRecommendedAction(
   if (status === "Not active") return "—";
   const actionMap: Record<string, string> = {
     freight: "Validate spot-exposed lanes, surcharges, and contract coverage by lane.",
+    fuel: "Review carrier fuel-surcharge tables and fuel clauses on fuel-sensitive lanes.",
     tariff: "Validate supplier country-of-origin and import-category exposure.",
-    steel: "Validate supplier-level landed cost and tariff impact by SKU.",
-    copper: "Review copper-exposed product lines and supplier pricing.",
-    aluminum: "Review aluminum-exposed product lines and supplier pricing.",
+    steel: "Validate supplier-level price updates and unpassed exposure by SKU.",
+    copper: "Validate supplier-level price updates and unpassed exposure by SKU.",
+    aluminum: "Validate supplier-level price updates and unpassed exposure by SKU.",
     manufacturing_demand: "Validate CRM pipeline and quote volume in manufacturing accounts before campaign.",
     construction_demand: "Monitor construction segment quote volume and order trend.",
     competitor: "Monitor win/loss data, pricing changes, and account displacement signals.",
@@ -382,7 +393,7 @@ export function computeDriverPriority(
         name: def.name,
         status,
         estimatedImpact: formatImpact(matchedOpChange.impact_low, matchedOpChange.impact_high),
-        estimateQuality: "Evidence-backed rate, partially grounded exposure",
+        estimateQuality: "Official metric-backed rate, partially grounded exposure",
         evidenceStrength: evidenceStrength(matchedOpChange.evidence_items, modelStatus),
         actionability: resolveActionability(status),
         relatedIssueTitle: matchedOpChange.risk_title,

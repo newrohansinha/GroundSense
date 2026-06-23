@@ -45,12 +45,16 @@ export default function SchedulerStatusCard({
   running,
   refreshKey = 0,
   canWrite = true,
+  currentRegister,
 }: {
   companyId: string | null;
   onRunNow?: () => void;
   running?: boolean;
   refreshKey?: number;
   canWrite?: boolean;
+  // Live register counts from the dashboard. Preferred over the stored last-run
+  // snapshot so the card never contradicts the current published issue count.
+  currentRegister?: { published: number; pending: number; quarantined: number };
 }) {
   const [status, setStatus] = useState<SchedulerStatus | null>(null);
   const [showHistory, setShowHistory] = useState(false);
@@ -75,12 +79,16 @@ export default function SchedulerStatusCard({
     setBusy(false);
   }
 
-  const resultLine = last
-    ? last.status === "skipped"
-      ? `Skipped — ${last.skipped_reason ?? "no material change"}`
-      : last.status === "failed"
-      ? `Failed — ${last.error_message ?? "see history"}`
-      : `${last.candidates_published} published · ${last.candidates_review} pending · ${last.candidates_quarantined} quarantined`
+  // Prefer the live register count over the last-run snapshot, which can lag the
+  // current dashboard (e.g. snapshot says 4 published while the register now has 5).
+  const resultLine = last && last.status === "skipped"
+    ? `Skipped — ${last.skipped_reason ?? "no material change"}`
+    : last && last.status === "failed"
+    ? `Failed — ${last.error_message ?? "see history"}`
+    : currentRegister
+    ? `Current register: ${currentRegister.published} published · ${currentRegister.pending} pending · ${currentRegister.quarantined} quarantined`
+    : last
+    ? `${last.candidates_published} published · ${last.candidates_review} pending · ${last.candidates_quarantined} quarantined`
     : "No runs recorded yet";
 
   return (
@@ -137,9 +145,11 @@ export default function SchedulerStatusCard({
             {running || activeRun ? "Run in progress…" : "Run now"}
           </button>
         )}
-        <button className="secondary-button" onClick={() => { setShowHistory((v) => !v); }}>
-          {showHistory ? "Hide run history" : "View run history"}
-        </button>
+        {canWrite && (
+          <button className="secondary-button" onClick={() => { setShowHistory((v) => !v); }}>
+            {showHistory ? "Hide run history" : "View run history"}
+          </button>
+        )}
         {cfg && canWrite && (
           <button className="secondary-button" onClick={toggleEnabled} disabled={busy}>
             {enabled ? "Disable schedule" : "Enable schedule"}

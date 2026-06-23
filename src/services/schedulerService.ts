@@ -67,10 +67,15 @@ export type RunCounters = {
   candidates_published?: number;
   candidates_review?: number;
   candidates_quarantined?: number;
+  watch_items_created?: number;
+  candidates_blocked?: number;
   actions_created?: number;
   exposure_paths_created?: number;
   forecasts_created?: number;
   briefs_created?: number;
+  articles_failed_normalization?: number;
+  articles_failed_insert?: number;
+  articles_skipped?: number;
 };
 
 export type RunEvent = {

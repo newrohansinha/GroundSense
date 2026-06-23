@@ -302,7 +302,7 @@ export default function ActionRoiPanel({ actions, compact = false, execMode = fa
                 (action.execBenefit || action.effortLevel) && (
                   <div className="gs-arp-benefit-row">
                     {action.execBenefit && (
-                      <span className="gs-arp-benefit">{action.execBenefit} · expected benefit</span>
+                      <span className="gs-arp-benefit">{action.execBenefit}</span>
                     )}
                     {action.effortLevel && <EffortBadge effort={action.effortLevel} />}
                   </div>
@@ -322,7 +322,7 @@ export default function ActionRoiPanel({ actions, compact = false, execMode = fa
                               {action.expectedBenefitHigh !== null ? formatMoney(action.expectedBenefitHigh) : "?"}
                             </>
                         }
-                        {" expected benefit"}
+                        {" exposure under review"}
                       </span>
                     )}
                     {action.effortLevel && <EffortBadge effort={action.effortLevel} />}
@@ -339,8 +339,16 @@ export default function ActionRoiPanel({ actions, compact = false, execMode = fa
 
               {action.decisionTrigger && (
                 <p className="gs-arp-detail-row">
-                  <span className="gs-arp-detail-label">Escalate when: </span>
-                  {action.decisionTrigger}
+                  {/* If the trigger already begins with "Escalate", render it as-is to
+                      avoid "Escalate when: Escalate if …". */}
+                  {/^escalate\b/i.test(action.decisionTrigger.trim()) ? (
+                    action.decisionTrigger
+                  ) : (
+                    <>
+                      <span className="gs-arp-detail-label">Escalate when: </span>
+                      {action.decisionTrigger}
+                    </>
+                  )}
                 </p>
               )}
 
@@ -354,7 +362,7 @@ export default function ActionRoiPanel({ actions, compact = false, execMode = fa
               {execMode ? (
                 action.execProtected && (
                   <p className="gs-arp-detail-row">
-                    <span className="gs-arp-detail-label">Protected value: </span>
+                    <span className="gs-arp-detail-label">Illustrative protected value: </span>
                     {action.execProtected}
                   </p>
                 )
