@@ -53,23 +53,29 @@ export default function CalibrationSummaryCard({ controller, publishedCount = 0,
         <span className="gs-calsum-persist gs-calsum-persist-local">Local editing: browser workbench</span>
       </div>
 
+      {/* Buyer-facing trust stats only — DB-backed, company-wide. The browser-local
+          workbench numbers are intentionally NOT here; they live behind the toggle so a
+          localStorage import score never reads like an executive KPI. */}
       <div className="gs-calsum-stats">
         <Stat value={`${publishedCount}/${publishedCount}`} label="Published issue coverage" tone={publishedCount > 0 ? "high" : undefined} />
         {dbCoverage
           ? <Stat value={`${dbCoverage.coverage_pct}%`} label={`DB/company calibration coverage · ${dbCoverage.domains_populated}/${dbCoverage.domains_total} domains`} tone={reliabilityTone(dbCoverage.coverage_pct)} />
           : <Stat value="n/a" label="DB/company calibration coverage · not loaded" />}
-        <Stat value={(summary.inputsCalibrated > 0 || summary.modelReliability > 0) ? `${summary.modelReliability}%` : "n/a"} label="Local workbench coverage (this browser only)" tone={reliabilityTone(summary.modelReliability)} />
-        <Stat value={String(summary.inferredAssumptions)} label="Inferred remaining (local)" />
-        <Stat value={String(summary.estimatesImproved)} label="Estimates improved" />
         <Stat value={String(watchlistBlocked)} label="Watchlist blocked by missing data" tone={watchlistBlocked > 0 ? "mid" : undefined} />
       </div>
 
       <button className="gs-calsum-details-toggle" onClick={() => setShowDetails((v) => !v)}>
-        {showDetails ? "▲ Hide per-domain detail" : "▼ Show per-domain detail"}
+        {showDetails ? "▲ Hide local workbench & per-domain detail" : "▼ Show local workbench & per-domain detail"}
       </button>
 
       {showDetails && (
       <>
+      <p className="gs-calsum-eyebrow" style={{ marginBottom: 6 }}>Local browser workbench — not company-wide truth</p>
+      <div className="gs-calsum-stats">
+        <Stat value={(summary.inputsCalibrated > 0 || summary.modelReliability > 0) ? `${summary.modelReliability}%` : "n/a"} label="Local workbench coverage (this browser only)" tone={reliabilityTone(summary.modelReliability)} />
+        <Stat value={String(summary.inferredAssumptions)} label="Inferred remaining (local)" />
+        <Stat value={String(summary.estimatesImproved)} label="Estimates improved" />
+      </div>
       <div className="gs-calsum-chips">
         {CHIP_DOMAINS.map(({ key, label }) => {
           const d = scoreByDomain(key);

@@ -79,6 +79,7 @@ import ExternalShockProvenance from "../components/sources/ExternalShockProvenan
 import SourceCoverageCard from "../components/sources/SourceCoverageCard";
 import CompanyExposureGraph from "../components/exposure/CompanyExposureGraph";
 import { buildExposureGraphViewModel } from "../services/exposure/exposureGraphViewModel";
+import { orderIssues, orderActions } from "../services/issues/issueOrdering";
 import DashboardSidebar from "../components/shell/DashboardSidebar";
 import SchedulerStatusCard from "../components/scheduler/SchedulerStatusCard";
 import RunHistoryPanel from "../components/scheduler/RunHistoryPanel";
@@ -1113,11 +1114,14 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
       );
 
     if (matching.length < 2) {
-      // Age-aware: "New" only when first detected within the last 7 days; older
-      // first-seen items are "Existing", never perpetually "New".
+      // Age-aware: "New" only when first detected within the last 72 hours, using the
+      // STABLE risk_register.created_at (preserved across reruns via update-in-place — the
+      // generator never deletes/recreates issue rows, so created_at is the real first-seen
+      // date, not a regenerated timestamp). Older first-seen items are "Existing", never
+      // perpetually "New" — so a 6-day-old issue is not badged New on every run.
       if (createdAt) {
-        const ageDays = (Date.now() - new Date(createdAt).getTime()) / 86_400_000;
-        if (Number.isFinite(ageDays)) return ageDays <= 7 ? "New" : "Existing";
+        const ageHours = (Date.now() - new Date(createdAt).getTime()) / 3_600_000;
+        if (Number.isFinite(ageHours)) return ageHours <= 72 ? "New" : "Existing";
       }
       return "Existing";
     }
@@ -1167,8 +1171,10 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   // truth (numeric-shock-ledger generator). The client gate is kept only as an
   // additive signal; it must never override the server decision, or dashboard /
   // risk-page / brief counts diverge. Published = gate_status 'published'.
-  const riskItems = _allRiskItems.filter((r) => (r as any).gate_status === "published");
-  const operatingChanges = _allOperatingChanges.filter((r) => (r as any).gate_status === "published");
+  // Canonical deterministic order (priority desc → |estimate| desc → title) so every
+  // buyer surface agrees and a priority tie (e.g. Copper vs Aluminum, both 75) is stable.
+  const riskItems = orderIssues(_allRiskItems.filter((r) => (r as any).gate_status === "published"));
+  const operatingChanges = orderIssues(_allOperatingChanges.filter((r) => (r as any).gate_status === "published"));
   // Watchlist = active (non-published) watch items, excluding superseded/archived rows.
   const watchlistItems = _allWatchlistItems.filter(
     (r) => (r as any).gate_status !== "published" && !(r as any).archived_at
@@ -1220,11 +1226,23 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   ]);
 
   // Actions linked only to published issues — hides actions from quarantined/review candidates
-  const publishedActions = actions.filter(action => {
-    if (action.risk_id) return publishedIssueIds.has(action.risk_id);
-    if (action.opportunity_id) return publishedIssueIds.has(action.opportunity_id);
-    return true;
-  });
+  // Canonical action order: logistics-driver actions first (Freight, then Diesel), then
+  // procurement metal actions by value (Steel, Copper, Aluminum). Enrich each action with
+  // its linked issue's priority + |estimate| so the shared comparator can order the metals.
+  const _issueByRiskId = new Map<string, any>([...riskItems, ...operatingChanges].map((r: any) => [r.id, r]));
+  const publishedActions = orderActions(
+    actions
+      .filter((action) => {
+        if (action.risk_id) return publishedIssueIds.has(action.risk_id);
+        if (action.opportunity_id) return publishedIssueIds.has(action.opportunity_id);
+        return true;
+      })
+      .map((action) => {
+        const li = action.risk_id ? _issueByRiskId.get(action.risk_id) : null;
+        const est = li ? Math.abs(Number((li.formula_inputs as any)?.result ?? li.impact_high ?? 0)) || 0 : 0;
+        return { ...action, priority_score: li?.priority_score ?? 0, estimate: est };
+      }),
+  );
 
   const blockedOpportunityCount = candidateQueueItems.filter(i => i.type === "opportunity").length;
 
@@ -1281,7 +1299,7 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   //    Only fall back to demo / local-workbench labels when no persisted record
   //    exists. localStorage state is never presented as company-wide truth.
   const calibrationSourceLabel = persistedCoverage
-    ? `All-model calibration coverage: ${persistedCoverage.coverage_pct}% · ${persistedCoverage.domains_populated}/${persistedCoverage.domains_total} domains (DB-backed)`
+    ? `DB/company calibration coverage: ${persistedCoverage.coverage_pct}% · ${persistedCoverage.domains_populated}/${persistedCoverage.domains_total} domains`
     : isDemoMode()
       ? "Demo calibration available"
       : localWorkbenchLoaded
@@ -1821,9 +1839,13 @@ function riskExposureSubtitle() {
                 <button className="secondary-button" disabled={busy !== null}>Calibrate Model</button>
               </Link>
             )}
-            <Link to="/sources">
-              <button className="secondary-button" disabled={busy !== null}>Source Hub</button>
-            </Link>
+            {/* Source Hub exposes operator connector health / raw audit / key errors —
+                hidden from buyer/demo. Buyers get the safe Source Coverage card below. */}
+            {canViewAdminControls() && (
+              <Link to="/sources">
+                <button className="secondary-button" disabled={busy !== null}>Source Hub</button>
+              </Link>
+            )}
             {canViewAdminControls() && (
               <button className="secondary-button" disabled title="Generate an Executive Brief first to enable export">Export Memo</button>
             )}

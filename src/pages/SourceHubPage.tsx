@@ -4,6 +4,7 @@ import { supabase } from "../lib/supabase";
 import type { MetricCsvCategory } from "../services/sources/manualMetricImportService";
 import ManualMetricImportPanel from "../components/sources/ManualMetricImportPanel";
 import { SOURCE_HUB_CSS } from "../components/sources/sourceHubStyles";
+import { isDemoMode, canViewAdminControls } from "../services/companyService";
 
 // Source Hub — ONE truth system. Every panel reads the server-side numeric ledger
 // (source_health_v + numeric_shocks + source_observations + article_metric_claims),
@@ -150,6 +151,36 @@ export default function SourceHubPage() {
   const invalidKeys = health.filter((h) => keyInvalid(h)).length;
   const validKeys = keysPresent - invalidKeys;
   const failing = health.filter((h) => h.last_error).length;
+
+  // Buyer/demo safety: the full Source Hub exposes connector API-key health, invalid-key
+  // (e.g. Census) errors, raw article/accounting funnels, refresh internals, and pg_net/run
+  // details — all operator-only. Buyers/demo get a safe evidence summary instead and are
+  // pointed at the dashboard's Source Coverage card. (Hides the link too; this guards direct
+  // URL navigation.)
+  if (isDemoMode() || !canViewAdminControls()) {
+    return (
+      <main className="shub-page">
+        <style>{SOURCE_HUB_CSS}</style>
+        <div className="shub-wrap">
+          <div className="shub-header">
+            <div>
+              <p className="shub-eyebrow">Evidence sources</p>
+              <h1 className="shub-title">Evidence Sources</h1>
+              <p className="shub-sub">
+                Official numeric sources — BLS, EIA, FRED, Census, and UN Comtrade — back the
+                published estimates and watchlist. The detailed connector audit (API-key health,
+                raw counts, and run internals) is available in operator mode only.
+              </p>
+            </div>
+          </div>
+          <p className="shub-sub" style={{ marginTop: 16 }}>
+            See the <Link to="/dashboard">dashboard Source Coverage</Link> card for which official
+            sources back each issue and their latest reading dates.
+          </p>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="shub-page">
