@@ -53,6 +53,11 @@ function NodeCard({
       <span className="gxg-node-title">{node.title}</span>
       {node.subtitle && <span className="gxg-node-sub">{node.subtitle}</span>}
       {node.valueLabel && <span className="gxg-node-value">{node.valueLabel}</span>}
+      {node.provenance && (
+        <span className="gxg-node-sub" style={{ fontSize: 10, opacity: 0.85 }}>
+          Input provenance: {node.provenance}
+        </span>
+      )}
       {node.meta?.owner && (
         <span className="gxg-node-meta">
           {node.meta.owner}
@@ -116,6 +121,12 @@ function DetailPanel({ node, onClose }: { node: ExposureGraphNode; onClose: () =
           <>
             <dt>Formula</dt>
             <dd>{node.meta.formula}</dd>
+          </>
+        )}
+        {node.provenance && (
+          <>
+            <dt>Input provenance</dt>
+            <dd>{node.provenance}</dd>
           </>
         )}
         {node.meta?.owner && (

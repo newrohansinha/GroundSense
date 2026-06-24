@@ -1383,6 +1383,7 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
       exposureText,
       evidenceStatus: evidenceBacked ? "evidence_backed" : articleBacked ? "article_claimed" : "scenario_modeled",
       sourceLabel: (r as any).numeric_basis_source_label ?? null,
+      provenanceLine: graphProvenanceText(r) || null,
       action: action
         ? { title: action.title, owner: action.owner || "Unassigned", due: fmtActionDue(action.deadline), nextStep: null }
         : null,
@@ -5153,6 +5154,27 @@ function officializeText(s?: string | null): string {
     .replace(/\bverified external (metric|number|shock)\b/gi, "official $1")
     .replace(/\bverified producer-price\b/gi, "official BLS producer-price")
     .replace(/\bverified\b/gi, "official");
+}
+
+// Exposure-graph provenance line — like inlineProvenanceText but INCLUDES the external
+// official metric input (the graph asks for it explicitly), e.g.
+// "freight spend — demo seed; spot % — demo seed; freight PPI move — official BLS metric".
+function graphProvenanceText(issue: any): string {
+  const prov = Array.isArray(issue?.formula_provenance) ? issue.formula_provenance : [];
+  if (prov.length === 0) return "";
+  const sourceLabel = (p: any): string => {
+    if (p.source_type === "official_metric") {
+      const agency = /EIA/i.test(p.source_label ?? "") ? "EIA" : /BLS/i.test(p.source_label ?? "") ? "BLS" : "official";
+      return `official ${agency} metric`;
+    }
+    const map: Record<string, string> = { uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual" };
+    return map[p.source_type] || p.source_type;
+  };
+  const inputName = (p: any): string => {
+    if (p.source_type === "official_metric") return /EIA/i.test(p.source_label ?? "") ? "diesel decrease" : "PPI move";
+    return p.input_label || p.input_name;
+  };
+  return prov.map((p: any) => `${inputName(p)} — ${sourceLabel(p)}`).join("; ");
 }
 
 // Concise per-input provenance shown directly under a formula (DB-backed, no need

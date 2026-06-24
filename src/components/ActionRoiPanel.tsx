@@ -370,8 +370,11 @@ export default function ActionRoiPanel({ actions, compact = false, execMode = fa
               {execMode ? (
                 action.execProtected && (
                   <p className="gs-arp-detail-row">
-                    <span className="gs-arp-detail-label">Illustrative protected value: </span>
+                    <span className="gs-arp-detail-label">Sensitivity example: </span>
                     {action.execProtected}
+                    <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                      Not a forecast; used for prioritization.
+                    </span>
                   </p>
                 )
               ) : (

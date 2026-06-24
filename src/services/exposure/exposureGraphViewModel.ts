@@ -50,6 +50,8 @@ export type ExposureGraphNode = {
   issueId?: string;
   driver?: string;
   caveat?: string;
+  /** Concise DB-backed input provenance line (e.g. "freight spend — demo seed; …; PPI move — official BLS metric"). */
+  provenance?: string;
   meta?: { owner?: string; due?: string; formula?: string };
 };
 
@@ -128,6 +130,8 @@ export type IssuePathInput = {
   exposureText?: string | null;
   evidenceStatus: "evidence_backed" | "scenario_modeled" | "watchlist" | string;
   sourceLabel?: string | null;
+  /** Concise DB-backed input provenance line (company inputs + official metric). */
+  provenanceLine?: string | null;
   action?: { title: string; owner: string; due: string; nextStep?: string | null } | null;
 };
 
@@ -244,7 +248,7 @@ function buildFreightPath(input: BuildExposureGraphInput): ExposurePath | null {
           : "Spot-exposed share of annual freight spend",
       valueLabel: spotExposed !== null ? `${fmtSpend(spotExposed)} spot-exposed spend` : undefined,
       status: "company_calibrated",
-      statusLabel: "Company-calibrated",
+      statusLabel: "DB-backed input provenance",
       driver: "freight",
     },
     {
@@ -269,7 +273,7 @@ function buildFreightPath(input: BuildExposureGraphInput): ExposurePath | null {
       title: "Current-period logistics cost pressure",
       valueLabel: execFreight.display,
       status: "estimate",
-      statusLabel: "Source-backed estimate",
+      statusLabel: "Official metric-backed estimate",
       caveat:
         "Lane exposure calibrated; rate validation pending — public index supports price pressure, lane-specific freight rate not yet verified.",
       driver: "freight",
@@ -441,7 +445,7 @@ function buildIssuePath(issue: IssuePathInput): ExposurePath {
       // or honestly state it isn't calibrated yet.
       subtitle: issue.exposureText ?? "Exposure basis not yet calibrated — add supplier/spend data in Calibration to ground this.",
       status: issue.exposureText ? "company_calibrated" : "assumption",
-      statusLabel: issue.exposureText ? "Company-calibrated" : "Calibration pending",
+      statusLabel: issue.exposureText ? "DB-backed input provenance" : "Calibration pending",
       issueId: issue.id,
       driver: issue.driver,
     },
@@ -456,6 +460,9 @@ function buildIssuePath(issue: IssuePathInput): ExposurePath {
       valueLabel: issue.impactDisplay,
       status: "estimate",
       statusLabel: evidenceBacked ? "Official metric-backed estimate" : "Scenario-modeled estimate",
+      // DB-backed input provenance (company inputs + official metric). Buyer never sees a
+      // silent UI-derived guess: if no persisted provenance, the audit message is shown.
+      provenance: issue.provenanceLine ?? "Input provenance unavailable — issue requires audit",
       issueId: issue.id,
       driver: issue.driver,
     },
@@ -466,7 +473,7 @@ function buildIssuePath(issue: IssuePathInput): ExposurePath {
       title: "Business impact",
       valueLabel: issue.impactDisplay,
       status: impactStatus,
-      statusLabel: evidenceBacked ? "Source-backed estimate" : "Scenario assumption",
+      statusLabel: evidenceBacked ? "Official metric-backed estimate" : "Scenario assumption",
       caveat: evidenceBacked
         ? undefined
         : "Scenario-modeled — validate company-specific supplier/spend inputs before relying on this figure.",

@@ -538,16 +538,32 @@ Deno.serve(async (req: Request) => {
     }).eq("company_id", companyId).in("issue_key", staleKeys);
   }
 
-  // 4b. Actions: clean slate, then one per published issue (no stale actions).
+  // 4b. Actions: one per published issue. A rerun (scheduled or manual) that regenerates
+  // an issue must NOT push an existing action's due date forward — otherwise actions can
+  // never become overdue. Preserve the prior deadline (and any terminal user status) keyed
+  // by the stable issue_key; only a genuinely NEW issue gets a fresh now + 7d deadline.
+  const { data: priorActions } = await db
+    .from("risk_actions")
+    .select("issue_key, deadline, status")
+    .eq("company_id", companyId);
+  const priorByIssue: Record<string, { deadline: string | null; status: string | null }> = {};
+  for (const a of (priorActions ?? []) as any[]) {
+    if (a.issue_key) priorByIssue[a.issue_key] = { deadline: a.deadline ?? null, status: a.status ?? null };
+  }
   await db.from("risk_actions").delete().eq("company_id", companyId);
   const pubCands = candidates.filter((c) => c.decision === "published");
   for (const c of pubCands) {
     const rid = writtenIds[c.issue_key];
     if (!rid) continue;
+    const prior = priorByIssue[c.issue_key];
+    // Preserve an existing due date (stable across reruns); only a new issue gets now + 7d.
+    const deadline = prior?.deadline ?? new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10);
+    // Preserve a terminal status a user/operator set; otherwise the action is open.
+    const status = prior?.status && ["completed", "dismissed", "done"].includes(prior.status) ? prior.status : "open";
     await db.from("risk_actions").insert({
       company_id: companyId, risk_id: rid, issue_key: c.issue_key, title: c.action_required.slice(0, 280),
-      owner: c.owner, status: "open", source_type: "risk",
-      deadline: new Date(Date.now() + 7 * 864e5).toISOString().slice(0, 10),
+      owner: c.owner, status, source_type: "risk",
+      deadline,
       expected_benefit: `Quantify and act on ${money(c.dollar)} ${c.issue_direction} exposure (${c.formula_text}).`,
     });
   }
