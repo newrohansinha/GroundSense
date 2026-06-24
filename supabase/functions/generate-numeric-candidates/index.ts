@@ -566,10 +566,11 @@ Deno.serve(async (req: Request) => {
   }
 
   // 4d/4e. Formula-input provenance + company calibration coverage (DB-backed trust
-  // foundation). Delegated to the single shared writer so manual (here) and scheduled
-  // (runOrchestration finalize) runs use identical, idempotent logic. It reads the
-  // risk_register rows just written, so reruns update in place (no duplicates) and stale
-  // inputs never linger. Estimates/formulas/gates are NOT touched.
+  // foundation). Delegated to the single shared writer; the staged worker's finalize
+  // (continue-intelligence-run) also calls it, so manual and scheduled runs use
+  // identical, idempotent logic. It reads the risk_register rows just written, so reruns
+  // update in place (no duplicates) and stale inputs never linger. Estimates/formulas/
+  // gates are NOT touched.
   const prov = await recomputeProvenanceAndCoverage(db, companyId);
   if (!prov.ok && prov.error) console.error("provenance/coverage writer error", prov.error);
 

@@ -135,7 +135,11 @@ export default function SchedulerStatusCard({
           <h2 className="section-title">Intelligence Schedule</h2>
           <p className="dashboard-subtitle" style={{ marginTop: 4, marginBottom: 0 }}>
             <span className="gs-sched-dot" style={{ background: enabled ? "var(--success)" : "var(--text-faint)" }} />
-            {cfg ? (enabled ? `Enabled · ${cfg.cadence} at ${cronTime(cfg.cron_expression)} ${cfg.timezone}` : "Disabled") : "Schedule not configured"}
+            {cfg
+              ? (enabled
+                  ? `Enrolled · the daily cron runs this company at ${cronTime(cfg.cron_expression)} ${cfg.timezone}`
+                  : "Not enrolled — the daily run skips this company")
+              : "Not enrolled — no schedule configured for this company"}
           </p>
         </div>
         <span className="badge" style={{ color: STATUS_TONE[last?.status ?? "queued"] }}>
@@ -149,7 +153,7 @@ export default function SchedulerStatusCard({
           <p className="gs-sched-v">{last ? `${last.trigger_type} · ${relative(last.started_at)}` : "—"}</p>
         </div>
         <div>
-          <p className="gs-sched-k">Last scheduled run</p>
+          <p className="gs-sched-k">Last scheduled run (this company)</p>
           <p className="gs-sched-v" style={lastScheduledFailed ? { color: "var(--danger)" } : scheduledInFlight ? { color: "var(--accent)" } : undefined}>
             {scheduledLine}
           </p>

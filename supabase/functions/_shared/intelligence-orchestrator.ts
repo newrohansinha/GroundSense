@@ -359,6 +359,14 @@ export async function cleanupRunArtifacts(
   console.info("[UltraDebug server] cleanup", { runId: opts.pipelineRunId, companyId, deleted });
 }
 
+// DEPRECATED / DEAD CODE (no callers as of 2026-06-23). This is the OLD synchronous
+// scheduled path: it ran fetch + generate + brief in one Edge invocation and could hit
+// WORKER_RESOURCE_LIMIT on a heavy company. The scheduled path now ENQUEUES a staged run
+// (scheduled-intelligence-run → continue-intelligence-run), the same resumable worker the
+// manual path uses. Left in place to limit blast radius; safe to delete in a future
+// cleanup once nothing imports it. Do NOT wire new callers to it. The other exports of
+// this module (detectChanges, cleanupRunArtifacts, admin) are still used by the staged
+// worker. TODO(cleanup): remove runOrchestration + its helpers once confirmed unused.
 export async function runOrchestration(opts: OrchestrationOptions): Promise<RunCounts> {
   const db = admin();
   const { companyId, runMode, force } = opts;

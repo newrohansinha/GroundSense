@@ -1,10 +1,11 @@
 // Shared, DB-driven provenance + calibration-coverage writer.
 //
-// SINGLE source of truth, called by BOTH run paths so manual and scheduled
-// intelligence runs keep formula_input_provenance + company_calibration_coverage
-// in sync with the currently published issues:
-//   - generate-numeric-candidates (manual staged worker, after it writes issues)
-//   - runOrchestration finalize    (scheduled cron path, even when generation is skipped)
+// SINGLE source of truth, called so manual AND scheduled intelligence runs keep
+// formula_input_provenance + company_calibration_coverage in sync with the currently
+// published issues. Both run types flow through the staged worker:
+//   - generate-numeric-candidates (after it writes issues, during generate-risks)
+//   - continue-intelligence-run finalize (manual AND scheduled staged runs; runs even
+//     when generation was skipped, so the audit layer stays fresh)
 //
 // It is purely a TRUST/audit layer: it reads risk_register.formula_inputs that the
 // generator already wrote and never touches formulas, estimates, gates, thresholds,
