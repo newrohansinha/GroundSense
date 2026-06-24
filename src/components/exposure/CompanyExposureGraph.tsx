@@ -226,7 +226,7 @@ export default function CompanyExposureGraph({
         ))}
         <div className="gxg-tab-links">
           <Link to="/sources" className="gxg-link">
-            Source Hub →
+            Evidence Sources →
           </Link>
           <Link to="/calibration" className="gxg-link">
             Calibration Center →

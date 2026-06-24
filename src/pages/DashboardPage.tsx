@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { supabase } from "../lib/supabase";
-import { isDemoMode, canViewAdminControls, syncOperatorModeFromUrl, leaveOperatorMode } from "../services/companyService";
+import { isDemoMode, canViewAdminControls, syncOperatorModeFromUrl, leaveOperatorMode, buyerCompanyName } from "../services/companyService";
 import { matchEventsToConnections } from "../services/eventConnectionMatcher";
 import { fetchEventsForCompany } from "../services/eventFetcher";
 import { scoreEventsForCompany } from "../services/eventScorer";
@@ -1756,22 +1756,16 @@ function riskExposureSubtitle() {
             <strong>Error loading dashboard:</strong> {dashError}
           </div>
         )}
-        <header className="dashboard-header">
-          <div>
-            <h1 className="dashboard-title">{view === "risks" ? "Risks" : "Executive Intelligence"}</h1>
-            <p className="dashboard-subtitle">
-              {view === "risks"
-                ? "Published issues, operating changes, candidate review, and evidence quality."
-                : `Official numeric signals mapped to ${company?.name ?? "your company's"} exposure, P&L impact, and actions.`}
+        {/* No large page-title/description block — the nav names the page. The Risks view
+            keeps a single compact KPI summary line; the Dashboard view starts straight at
+            the KPI cards. */}
+        {view === "risks" && (
+          <header className="dashboard-header">
+            <p className="dashboard-subtitle" style={{ margin: 0, fontWeight: 600, color: "var(--text-secondary)" }}>
+              {pluralize(riskItems.length + operatingChanges.length, "published item")} · Downside {formatExecutiveEstimate(execRiskSectionTotal)}{execChangeSectionTotal > 0 ? ` · Favorable relief ${formatExecutiveEstimate(execChangeSectionTotal)}` : ""} · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
             </p>
-            {view === "risks" && (
-              <p className="dashboard-subtitle" style={{ marginTop: 6, fontWeight: 600, color: "var(--text-secondary)" }}>
-                {pluralize(riskItems.length + operatingChanges.length, "published item")} · Downside {formatExecutiveEstimate(execRiskSectionTotal)}{execChangeSectionTotal > 0 ? ` · Favorable relief ${formatExecutiveEstimate(execChangeSectionTotal)}` : ""} · {pluralize(riskItems.length, "operating risk")} · {pluralize(operatingChanges.length, "operating change")}
-              </p>
-            )}
-          </div>
-
-        </header>
+          </header>
+        )}
 
         {!isDemoMode() &&
           riskItems.length === 0 &&
@@ -1864,7 +1858,7 @@ function riskExposureSubtitle() {
                 hidden from buyer/demo. Buyers get the safe Source Coverage card below. */}
             {canViewAdminControls() && (
               <Link to="/sources">
-                <button className="secondary-button" disabled={busy !== null}>Source Hub</button>
+                <button className="secondary-button" disabled={busy !== null}>Source Audit</button>
               </Link>
             )}
             {canViewAdminControls() && (
@@ -2828,7 +2822,7 @@ function CompactMemoSection({
     watchlistItems,
     actions,
     execByIssueId,
-    companyName: company?.name ?? "",
+    companyName: buyerCompanyName(company?.name) || (company?.name ?? ""),
   });
 
   const memoStructure = execMode && execMemoLines.length > 0 ? execMemoLines : getMemoLine({
@@ -2951,7 +2945,7 @@ function CompanyModelSection({
     <section className="card company-model-compact">
       <div className="company-compact-header">
         <div className="company-compact-profile">
-          <h2 className="company-compact-name">{company?.name || "No company"}</h2>
+          <h2 className="company-compact-name">{buyerCompanyName(company?.name) || "No company"}</h2>
           <div className="company-compact-meta">
             <span className="company-compact-industry">{company?.industry || "Industry not set"}</span>
             {company?.revenue_range && (
@@ -5213,7 +5207,7 @@ function graphProvenanceText(issue: any): string {
       const agency = /EIA/i.test(p.source_label ?? "") ? "EIA" : /BLS/i.test(p.source_label ?? "") ? "BLS" : "official";
       return `official ${agency} metric`;
     }
-    const map: Record<string, string> = { uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual" };
+    const map: Record<string, string> = { uploaded_csv: "uploaded calibration", demo_seed: "sample calibration", calibration_table: "company calibration", inferred_assumption: "inferred assumption", manual: "manual calibration" };
     return map[p.source_type] || p.source_type;
   };
   const inputName = (p: any): string => {
@@ -6154,7 +6148,7 @@ function TrustAuditPanel({
   const dbProvenance: any[] = Array.isArray((issue as any)?.formula_provenance) ? (issue as any).formula_provenance : [];
   const provenanceFromDb = dbProvenance.length > 0;
   const sourceTypeLabel = (st: string): string =>
-    (({ uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual entry", official_metric: "official metric" } as Record<string, string>)[st] || st);
+    (({ uploaded_csv: "uploaded calibration", demo_seed: "sample calibration", calibration_table: "company calibration", inferred_assumption: "inferred assumption", manual: "manual calibration", official_metric: "official metric" } as Record<string, string>)[st] || st);
   const operatorView = canViewAdminControls();
 
   // ── Formula governance (task 2) ──

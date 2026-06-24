@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { getTheme, toggleTheme, type Theme } from "../../lib/theme";
 import { useAuth } from "../../context/AuthContext";
 import { useCompany } from "../../context/CompanyContext";
-import { clearActiveCompany } from "../../services/companyService";
+import { clearActiveCompany, buyerCompanyName } from "../../services/companyService";
 
 const NAV = [
   { to: "/dashboard", label: "Dashboard" },
@@ -59,8 +59,8 @@ export default function TopNav() {
         </NavLink>
 
         {company && (
-          <span className="gs-co-chip" title={company.name}>
-            {company.name}
+          <span className="gs-co-chip" title={buyerCompanyName(company.name)}>
+            {buyerCompanyName(company.name)}
             {demo && <span className="gs-co-demo">DEMO</span>}
           </span>
         )}
@@ -112,7 +112,7 @@ export default function TopNav() {
               <div className="gs-menu" role="menu">
                 <div className="gs-menu-head">
                   <div className="gs-menu-email">{user.email}</div>
-                  {company && <div className="gs-menu-co">{company.name}</div>}
+                  {company && <div className="gs-menu-co">{buyerCompanyName(company.name)}</div>}
                   <div className={`gs-menu-status ${onboardingComplete ? "is-done" : "is-pending"}`}>
                     {onboardingComplete ? "Onboarding complete" : "Setup in progress"}
                   </div>

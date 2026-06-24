@@ -111,10 +111,10 @@ export default function SourceCoverageCard({ companyId }: Props) {
       <style>{CSS}</style>
       <div className="scc-head">
         <div>
-          <p className="scc-eyebrow">Numeric source coverage · why output is what it is</p>
-          <h2 className="scc-title">Source Gap</h2>
+          <p className="scc-eyebrow">Which official sources back the published estimates</p>
+          <h2 className="scc-title">{audit ? "Source Audit" : "Evidence Coverage"}</h2>
         </div>
-        <Link to="/sources"><button className="scc-btn scc-btn-primary">Open Source Hub →</button></Link>
+        <Link to="/sources"><button className="scc-btn scc-btn-primary">{audit ? "Open Source Audit →" : "Open Evidence Sources →"}</button></Link>
       </div>
 
       {/* ── Buyer executive summary (default). Raw connector diagnostics are operator-only. ── */}

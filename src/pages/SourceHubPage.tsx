@@ -189,7 +189,7 @@ export default function SourceHubPage() {
         <div className="shub-header">
           <div>
             <p className="shub-eyebrow">{companyName} · server-side numeric source ledger</p>
-            <h1 className="shub-title">Source Hub</h1>
+            <h1 className="shub-title">Source Audit</h1>
             <p className="shub-sub">Official numeric sources via Edge Function secrets. Status, keys, and shocks come from source_health + numeric_shocks — one truth system.</p>
           </div>
           <div className="shub-header-actions">

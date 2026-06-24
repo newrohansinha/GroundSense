@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import { canViewAdminControls } from "../../services/companyService";
 import type { UseCalibrationWorkbench } from "../../services/calibration/useCalibrationWorkbench";
 import type { DomainKey } from "../../services/calibration/types";
 
@@ -47,10 +48,14 @@ export default function CalibrationSummaryCard({ controller, publishedCount = 0,
       <style>{CSS}</style>
       <div className="gs-calsum-head">
         <div>
-          <p className="gs-calsum-eyebrow">Calibration coverage by source — published issues, company DB, and local workbench shown separately</p>
+          <p className="gs-calsum-eyebrow">How much of the published estimates is backed by company calibration</p>
           <h2 className="gs-calsum-title">Calibration Summary</h2>
         </div>
-        <span className="gs-calsum-persist gs-calsum-persist-local">Local editing: browser workbench</span>
+        {/* The local browser-workbench badge is operator-only — never presented as a
+            company-wide metric on the buyer dashboard. */}
+        {canViewAdminControls() && (
+          <span className="gs-calsum-persist gs-calsum-persist-local">Local editing: browser workbench</span>
+        )}
       </div>
 
       {/* Buyer-facing trust stats only — DB-backed, company-wide. The browser-local

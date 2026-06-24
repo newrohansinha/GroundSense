@@ -131,6 +131,15 @@ export function canViewSourceAudit(): boolean {
   return isOperatorMode();
 }
 
+// Buyer/demo-facing company name. Operators see the exact internal workspace name; buyers
+// and demo never see the internal "… DEV" suffix (e.g. "Fastenal DEV" → "Fastenal Demo").
+export function buyerCompanyName(name: string | null | undefined): string {
+  const n = (name ?? "").trim();
+  if (!n || canViewAdminControls()) return n;
+  const clean = n.replace(/\s*\bDEV\b\s*$/i, "").trim();
+  return isDemoMode() && !/demo/i.test(clean) ? `${clean} Demo` : clean;
+}
+
 export function enterDemoMode(): void {
   try {
     localStorage.setItem(ACTIVE_COMPANY_KEY, DEMO_COMPANY_ID);
