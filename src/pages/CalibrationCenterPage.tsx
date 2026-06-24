@@ -8,6 +8,8 @@ import { CALIBRATION_DOMAINS } from "../services/calibration/calibrationDomains"
 import { downloadTemplate } from "../services/calibration/csvTemplateService";
 import type { DomainKey } from "../services/calibration/types";
 import CalibrationCenter from "../components/calibration/CalibrationCenter";
+import CalibrationInputsEditor from "../components/calibration/CalibrationInputsEditor";
+import { buyerCompanyName } from "../services/companyService";
 
 type Company = {
   id: string;
@@ -112,22 +114,20 @@ export default function CalibrationCenterPage() {
   return (
     <main className="calibration-center-page" style={pageStyle}>
       <div style={{ maxWidth: 1180, margin: "0 auto", padding: "24px" }}>
-        <div style={headerBar}>
-          <div>
-            <p style={eyebrow}>{company.name} · company operating model</p>
-            <h1 style={titleStyle}>Calibration Center</h1>
-            <p style={subStyle}>Replace inferred assumptions with company-specific operating data.</p>
-          </div>
+        {/* Compact label only — no large page hero. The editable base inputs render directly
+            below (no broken link to a separate base page). */}
+        <div style={{ ...headerBar, marginBottom: 14 }}>
+          <p style={eyebrow}>{buyerCompanyName(company.name)} · calibration</p>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "flex-end" }}>
             <Link to="/dashboard">
               <button style={btnGhost}>← Back to Dashboard</button>
             </Link>
-            <Link to="/calibration/base">
-              <button style={btnGhost}>Edit base financial assumptions</button>
-            </Link>
             <button style={btnGhost} onClick={handleDownloadAllTemplates}>Download all templates</button>
           </div>
         </div>
+
+        {/* Base model inputs — editable, directly on this page. */}
+        <CalibrationInputsEditor companyId={company.id} />
 
         <CalibrationCenter controller={controller} />
 
@@ -185,8 +185,6 @@ const eyebrow: React.CSSProperties = {
   color: "var(--accent-hover)",
 };
 
-const titleStyle: React.CSSProperties = { margin: "4px 0 2px", fontSize: 26, fontWeight: 800, color: "var(--text-primary)" };
-const subStyle: React.CSSProperties = { margin: 0, fontSize: 14, color: "var(--text-muted)" };
 
 const btnBase: React.CSSProperties = {
   fontSize: 13,

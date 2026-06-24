@@ -158,24 +158,48 @@ export default function SourceHubPage() {
   // pointed at the dashboard's Source Coverage card. (Hides the link too; this guards direct
   // URL navigation.)
   if (isDemoMode() || !canViewAdminControls()) {
+    // Buyer-safe Evidence Sources — useful source rows, never connector/API-key/run internals.
+    const STATUS_TONE: Record<string, { bg: string; fg: string }> = {
+      "Used in estimates": { bg: "var(--success-bg)", fg: "var(--success)" },
+      "Used in watchlist": { bg: "var(--accent-muted)", fg: "var(--accent-hover)" },
+      "Monitored": { bg: "var(--bg-surface-muted)", fg: "var(--text-muted)" },
+      "Setup pending": { bg: "var(--bg-surface-muted)", fg: "var(--warning)" },
+    };
+    const sources = [
+      { name: "BLS", category: "Producer Price Index / official cost metrics", latest: "May 2026", status: "Used in estimates", related: "Freight, Steel, Copper, Aluminum", note: "Official PPI moves are mapped to freight and commodity exposure." },
+      { name: "EIA", category: "Diesel retail price", latest: "2026-06-22", status: "Used in estimates", related: "Diesel fuel-surcharge relief", note: "Diesel movement drives the fuel-surcharge relief estimate." },
+      { name: "FRED", category: "Macro / industrial indicators", latest: "Latest available", status: "Monitored", related: "Macro / demand context", note: "Tracked for future demand and macro exposure mapping." },
+      { name: "UN Comtrade", category: "Trade-flow context", latest: "2025 annual", status: "Used in watchlist", related: "Steel supplier-availability watch", note: "Trade flows support supplier-availability watch items." },
+      { name: "USITC", category: "Trade / tariff context", latest: "Latest available", status: "Monitored", related: "Tariff exposure context", note: "Monitored for tariff exposure not yet mapped to a published issue." },
+      { name: "Census", category: "Demand / orders indicators", latest: "Setup pending", status: "Setup pending", related: "Demand watchlist", note: "Not yet contributing to estimates; demand mapping pending." },
+    ];
     return (
       <main className="shub-page">
         <style>{SOURCE_HUB_CSS}</style>
         <div className="shub-wrap">
-          <div className="shub-header">
-            <div>
-              <p className="shub-eyebrow">Evidence sources</p>
-              <h1 className="shub-title">Evidence Sources</h1>
-              <p className="shub-sub">
-                Official numeric sources — BLS, EIA, FRED, Census, and UN Comtrade — back the
-                published estimates and watchlist. The detailed connector audit (API-key health,
-                raw counts, and run internals) is available in operator mode only.
-              </p>
-            </div>
+          {/* Compact label only — no large page hero. */}
+          <p className="shub-eyebrow" style={{ marginBottom: 12 }}>Evidence Sources · official sources behind the estimates</p>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 12 }}>
+            {sources.map((s) => {
+              const tone = STATUS_TONE[s.status] ?? STATUS_TONE["Monitored"];
+              return (
+                <div key={s.name} style={{ border: "1px solid var(--border-default)", borderRadius: 12, padding: 14, background: "var(--bg-surface)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <span style={{ fontWeight: 750, fontSize: 15 }}>{s.name}</span>
+                    <span style={{ fontSize: 11, fontWeight: 700, padding: "2px 8px", borderRadius: 999, background: tone.bg, color: tone.fg }}>{s.status}</span>
+                  </div>
+                  <p style={{ margin: "0 0 6px", fontSize: 12, color: "var(--text-secondary)" }}>{s.category}</p>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 12 }}>
+                    <span><b style={{ color: "var(--text-muted)" }}>Latest:</b> {s.latest}</span>
+                    <span><b style={{ color: "var(--text-muted)" }}>Related:</b> {s.related}</span>
+                  </div>
+                  <p style={{ margin: "8px 0 0", fontSize: 11.5, color: "var(--text-muted)" }}>{s.note}</p>
+                </div>
+              );
+            })}
           </div>
-          <p className="shub-sub" style={{ marginTop: 16 }}>
-            See the <Link to="/dashboard">dashboard Source Coverage</Link> card for which official
-            sources back each issue and their latest reading dates.
+          <p className="shub-sub" style={{ marginTop: 14, fontSize: 12 }}>
+            Only sources that map to company exposure, a formula, and an owner action become published issues. Detailed source diagnostics are available in operator mode.
           </p>
         </div>
       </main>
