@@ -2246,7 +2246,7 @@ function riskExposureSubtitle() {
           <Metric
             title="Published issue coverage"
             value={`${publishedWithInputs}/${publishedTotal}`}
-            subtitle={`${publishedWithInputs === publishedTotal ? "All published issues have complete formula inputs" : `${publishedWithInputs} of ${publishedTotal} published issues have complete formula inputs`} · ${calibrationSourceLabel}${watchlistItems.length > 0 ? ` · ${watchlistItems.length} watchlist item${watchlistItems.length === 1 ? "" : "s"} blocked by missing data` : ""}`}
+            subtitle={calibrationSourceLabel}
             explanation={{
               title: "Published issue input coverage (three distinct concepts)",
               displayedValue: `${publishedWithInputs}/${publishedTotal} published issues have a complete formula + company inputs`,
@@ -2849,7 +2849,7 @@ function CompactMemoSection({
           {/* Strip any "· Generated <date>" suffix baked into the stored title — the
               generated date is shown once, in the local-time "Last generated" badge, so the
               title never contradicts it (UTC title date vs local badge date). */}
-          <h2 className="section-title">{brief ? (briefStale ? "Last generated brief" : ((brief.title || "Intelligence Summary").replace(/\s*·\s*Generated\b.*/i, "").trim())) : "Intelligence Summary"}</h2>
+          <h2 className="section-title">{brief ? (briefStale ? "Last generated brief" : ((brief.title || "Intelligence Summary").replace(/\s*·\s*Generated\b.*/i, "").replace(/Executive Intelligence Brief/i, "Intelligence Brief").trim())) : "Intelligence Summary"}</h2>
           {brief && briefStale && <p className="dashboard-subtitle" style={{ margin: "2px 0 0" }}>Not the current live summary — see warning below.</p>}
         </div>
         {brief ? (

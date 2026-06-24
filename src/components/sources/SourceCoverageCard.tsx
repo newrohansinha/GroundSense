@@ -120,15 +120,19 @@ export default function SourceCoverageCard({ companyId }: Props) {
       {/* ── Buyer executive summary (default). Raw connector diagnostics are operator-only. ── */}
       {!audit && (
         <>
+          {/* Compact stats only — the "why not every move is published" detail lives in the
+              tooltip below, not a bulky paragraph. */}
           <div className="scc-stats">
             <Stat value={String(publishedCount)} label="Published issues" tone="good" />
-            <Stat value={String(publishable)} label="Official metric moves detected" />
+            <Stat value={String(publishable)} label="Official metric moves" />
+            <Stat value={String(publishedCount)} label="Mapped to exposure" />
+            <Stat value={String(notPublished)} label="Monitored, not published" />
           </div>
-          <p className="scc-summary">
-            Current published issues use official BLS/EIA metrics.{monitoredSources.length > 0 ? ` Additional sources monitored: ${monitoredSources.join(", ")}.` : ""}{failing.length > 0 ? ` ${failing.length} monitored source${failing.length === 1 ? " is" : "s are"} not yet contributing to estimates (setup pending).` : ""}
-          </p>
-          <p className="scc-summary scc-summary-muted">
-            {publishable} official metric moves detected; {publishedCount} mapped to company exposure and published; {notPublished} not published because there is no distinct exposure base, formula, or owner action. Not every metric move should become an issue.
+          <p
+            className="scc-summary scc-summary-muted"
+            title={`Official BLS/EIA metrics back the published issues.${monitoredSources.length > 0 ? ` Also monitored: ${monitoredSources.join(", ")}.` : ""} Not every official metric move becomes an issue; publication requires a distinct exposure base, formula, and owner action.`}
+          >
+            Official BLS/EIA metrics back the published estimates. <span aria-hidden="true" style={{ cursor: "help", opacity: 0.7 }}>ⓘ</span>
           </p>
         </>
       )}
