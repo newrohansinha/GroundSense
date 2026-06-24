@@ -125,7 +125,7 @@ export default function SourceCoverageCard({ companyId }: Props) {
             <Stat value={String(publishable)} label="Official metric moves detected" />
           </div>
           <p className="scc-summary">
-            Current published issues use official BLS/EIA metrics.{monitoredSources.length > 0 ? ` Additional sources monitored: ${monitoredSources.join(", ")}.` : ""}{failing.length > 0 ? ` ${failing.length} connector${failing.length === 1 ? " needs" : "s need"} operator attention.` : ""}
+            Current published issues use official BLS/EIA metrics.{monitoredSources.length > 0 ? ` Additional sources monitored: ${monitoredSources.join(", ")}.` : ""}{failing.length > 0 ? ` ${failing.length} monitored source${failing.length === 1 ? " is" : "s are"} not yet contributing to estimates (setup pending).` : ""}
           </p>
           <p className="scc-summary scc-summary-muted">
             {publishable} official metric moves detected; {publishedCount} mapped to company exposure and published; {notPublished} not published because there is no distinct exposure base, formula, or owner action. Not every metric move should become an issue.

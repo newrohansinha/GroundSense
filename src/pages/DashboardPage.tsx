@@ -1355,8 +1355,18 @@ setMatchedConnectionsByItemId(matchedConnectionMap);
   // Real action owner/due per issue_key, so the Exposure Graph action nodes match the
   // Executive Actions card (same canonical risk_actions records — no hardcoded graph dates).
   // Formatted identically to ActionRoiPanel.formatDate so the displayed dates agree exactly.
-  const fmtActionDue = (d: string | null | undefined) =>
-    d ? new Date(d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+  // Action deadlines are business DATES (DB type date / "YYYY-MM-DD"). new Date("2026-06-30")
+  // parses as UTC midnight, which toLocaleDateString then shifts to Jun 29 in any UTC- timezone
+  // (the off-by-one buyers saw). Parse the date parts as a LOCAL date so the displayed day always
+  // equals the DB business date in every timezone.
+  const fmtActionDue = (d: string | null | undefined) => {
+    if (!d) return "";
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d));
+    const dt = m
+      ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
+      : new Date(d);
+    return dt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  };
   const actionByIssueKey = new Map<string, { owner: string; due: string }>();
   for (const a of actions as any[]) {
     if (a.issue_key && !actionByIssueKey.has(a.issue_key)) {
@@ -1612,13 +1622,24 @@ function riskExposureSubtitle() {
         outcomeStatus: "Open — awaiting validation",
       });
     }
-    // Sort by business relevance: largest dollar impact first (freight → diesel →
-    // steel → copper → aluminum), favorable value-capture included.
-    return [...items].sort(
-      (a, b) =>
+    // Canonical Executive Actions order: downside-mitigation logistics first (Freight),
+    // then favorable capture (Diesel/fuel), then procurement metals by value (Steel, Copper,
+    // Aluminum). Mirrors the shared orderActions rule — downside mitigation leads even when a
+    // favorable item (diesel, now ~$1.47M) has a larger absolute dollar value than freight.
+    const drank = (it: any): number => {
+      const s = `${it.title ?? ""} ${it.linkedIssueTitle ?? ""}`.toLowerCase();
+      if (s.includes("freight")) return 0;
+      if (s.includes("fuel") || s.includes("diesel")) return 1;
+      return 2;
+    };
+    return [...items].sort((a, b) => {
+      const da = drank(a), db = drank(b);
+      if (da !== db) return da - db;
+      return (
         Math.abs(Number(b.expectedBenefitHigh ?? b.protectedValue ?? 0)) -
         Math.abs(Number(a.expectedBenefitHigh ?? a.protectedValue ?? 0))
-    );
+      );
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [publishedActions, risks, opportunities, execByIssueId, operatingChanges]);
 
@@ -2831,11 +2852,14 @@ function CompactMemoSection({
     <section className="card memo-section">
       <div className="card-header">
         <div>
-          <h2 className="section-title">{brief ? (briefStale ? "Last generated brief" : (brief.title || "Intelligence Summary")) : "Intelligence Summary"}</h2>
+          {/* Strip any "· Generated <date>" suffix baked into the stored title — the
+              generated date is shown once, in the local-time "Last generated" badge, so the
+              title never contradicts it (UTC title date vs local badge date). */}
+          <h2 className="section-title">{brief ? (briefStale ? "Last generated brief" : ((brief.title || "Intelligence Summary").replace(/\s*·\s*Generated\b.*/i, "").trim())) : "Intelligence Summary"}</h2>
           {brief && briefStale && <p className="dashboard-subtitle" style={{ margin: "2px 0 0" }}>Not the current live summary — see warning below.</p>}
         </div>
         {brief ? (
-          <span className="badge">Last generated: {new Date(brief.created_at).toLocaleString()}</span>
+          <span className="badge">Generated {new Date(brief.created_at).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}</span>
         ) : (
           <span className="badge">Executive brief preview</span>
         )}
@@ -3113,7 +3137,7 @@ function QualityGateReport({ gateResult, confidence = 0, metricBacked = false }:
   // issue's confidence, and a second number on this line read as a contradicting
   // "model confidence" value.
   const why = floored
-    ? "official metric-backed estimate; alignment heuristic understates numeric-shock issues"
+    ? "Official metric source with company exposure and owner action; confidence is limited by unvalidated supplier/pass-through assumptions"
     : gateResult.forecastEligible
     ? "official metric source + company exposure + actionability"
     : "evidence aligned and company-relevant; forecast pending validation";
@@ -5203,11 +5227,11 @@ function graphProvenanceText(issue: any): string {
 // to open the audit tab). e.g. "steel spend — demo seed; unpassed % — inferred assumption".
 function inlineProvenanceText(issue: any): string {
   const prov = Array.isArray(issue?.formula_provenance) ? issue.formula_provenance : [];
-  const map: Record<string, string> = { uploaded_csv: "uploaded CSV", demo_seed: "demo seed", calibration_table: "calibration table", inferred_assumption: "inferred assumption", manual: "manual", official_metric: "official metric" };
   if (prov.length > 0) {
-    // Company inputs only (skip the external official-metric row in the concise inline view).
-    const rows = prov.filter((p: any) => p.source_type !== "official_metric");
-    return (rows.length ? rows : prov).map((p: any) => `${p.input_label || p.input_name} — ${map[p.source_type] || p.source_type}`).join("; ");
+    // Same COMPLETE provenance line as the Dashboard Exposure Graph — company inputs AND the
+    // external official BLS/EIA metric (e.g. "PPI move — official BLS metric") — so the Risks
+    // page and the graph never disagree. DB-backed only; no UI heuristic fallback.
+    return graphProvenanceText(issue);
   }
   // A metric-backed issue with a formula SHOULD have DB provenance — never infer silently.
   const hasFormula = Boolean(issue?.formula || (issue?.methodology && issue.methodology.formula));

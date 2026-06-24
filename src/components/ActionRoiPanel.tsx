@@ -46,7 +46,11 @@ function formatMoney(n: number): string {
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
   try {
-    const d = new Date(iso);
+    // Deadlines are business DATES ("YYYY-MM-DD"). Parse the parts as a LOCAL date so the
+    // displayed day equals the DB date in every timezone — new Date("2026-06-30") is UTC
+    // midnight, which shifts to Jun 29 in any UTC- zone (the off-by-one buyers saw).
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso));
+    const d = m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : new Date(iso);
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   } catch {
     return iso;

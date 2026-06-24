@@ -170,7 +170,7 @@ export default function CompanyExposureGraph({
     { key: "active", label: "Active paths", count: model.summary.activeCount },
     { key: "supporting", label: "Supporting signals", count: model.summary.supportingCount },
     { key: "blocked", label: "Blocked candidates", count: model.summary.blockedCount },
-    { key: "audit", label: "Audit / raw paths" },
+    { key: "audit", label: "Review-only paths" },
   ];
 
   return (
@@ -311,13 +311,13 @@ export default function CompanyExposureGraph({
         </div>
       )}
 
-      {/* Audit / raw paths */}
+      {/* Review-only paths */}
       {tab === "audit" && (
         <div className="gxg-audit">
           <p className="gxg-support-note">
-            Raw exposure paths and sensitivity — engineering audit view, not the executive estimate.
+            Exposure paths under review — not yet part of the executive estimate.
           </p>
-          {auditContent ?? <p className="gxg-empty">No raw paths recorded.</p>}
+          {auditContent ?? <p className="gxg-empty">No review-only paths.</p>}
         </div>
       )}
 
