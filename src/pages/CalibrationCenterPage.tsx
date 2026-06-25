@@ -129,6 +129,12 @@ export default function CalibrationCenterPage() {
         {/* Base model inputs — editable, directly on this page. */}
         <CalibrationInputsEditor companyId={company.id} />
 
+        {/* Separate the live model inputs above from the data-coverage workbench below. */}
+        <div style={{ display: "flex", alignItems: "baseline", gap: 10, margin: "26px 0 14px" }}>
+          <h2 style={{ margin: 0, fontSize: 15, fontWeight: 700, letterSpacing: "-0.01em", color: "var(--text-primary)" }}>Data coverage &amp; uploads</h2>
+          <span style={{ fontSize: 12.5, color: "var(--text-muted)" }}>Domain-by-domain completeness and CSV imports that ground the inputs above.</span>
+        </div>
+
         <CalibrationCenter controller={controller} />
 
         {/* Advanced / Danger Zone — destructive controls collapsed; never one click away. */}
